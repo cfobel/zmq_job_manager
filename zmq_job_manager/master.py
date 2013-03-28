@@ -1,29 +1,22 @@
-from collections import OrderedDict
+from datetime import datetime
 
 import zmq
-from zmq.utils import jsonapi
-from zmq_helpers.socket_configs import SockConfigsTask, DeferredSocket
+from zmq_helpers.socket_configs import DeferredSocket
+from zmq_helpers.rpc import ZmqJsonRpcTask
 
 
-class Master(SockConfigsTask):
-    def __init__(self, rep_uri, control_pipe=None, **kwargs):
-        self.uris = OrderedDict([
-            ('rep', rep_uri),
-        ])
-        self.sock_configs = OrderedDict([
-                ('rep', DeferredSocket(zmq.REP)
-                            .stream_callback('on_recv', self.process_request)),
-        ])
-        for k in self.sock_configs:
-            if kwargs.get(k + '_bind'):
-                self.sock_configs[k].bind(self.uris[k])
-            else:
-                self.sock_configs[k].connect(self.uris[k])
-        super(Master, self).__init__(self.sock_configs, control_pipe=control_pipe)
+class Master(ZmqJsonRpcTask):
+    def __init__(self, pub_uri, *args, **kwargs):
+        super(Master, self).__init__(*args, **kwargs)
+        self.uris['pub'] = pub_uri
+        self.sock_configs['pub'] = DeferredSocket(zmq.PUB).bind(pub_uri)
 
-    def process_request(self, env, multipart_message):
-        timestamp, command, args, kwargs = map(jsonapi.loads, multipart_message)
-        env['socks']['rep'].send_multipart(multipart_message)
+    def on__hello_world(self, env, uuid):
+        message = '[%s] hello world %s' % (datetime.now(), uuid)
+        print message
+        env['socks']['pub'].send_multipart([message])
+        return message
+
 
 
 def parse_args():
@@ -31,13 +24,15 @@ def parse_args():
     from argparse import ArgumentParser
 
     parser = ArgumentParser(description='''Job manager master''')
+    parser.add_argument(nargs=1, dest='pub_uri', type=str)
     parser.add_argument(nargs=1, dest='rep_uri', type=str)
     args = parser.parse_args()
+    args.pub_uri = args.pub_uri[0]
     args.rep_uri = args.rep_uri[0]
     return args
 
 
 if __name__ == '__main__':
     args = parse_args()
-    m = Master(args.rep_uri)
+    m = Master(args.pub_uri, args.rep_uri)
     m.run()

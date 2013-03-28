@@ -1,9 +1,11 @@
-from datetime import datetime
+import logging
 from collections import OrderedDict
+from datetime import datetime
 
 import zmq
 from zmq_helpers.socket_configs import DeferredSocket
 from zmq_helpers.rpc import ZmqJsonRpcTask, ZmqJsonRpcProxy
+from zmq_helpers.utils import log_label
 
 
 class Broker(ZmqJsonRpcTask):
@@ -88,13 +90,16 @@ class Broker(ZmqJsonRpcTask):
         data.insert(0, self.serialize_frame(response['timestamp']))
         data.append(error)
         data = multipart_message[:2] + data
-        print '[send_response]', data, request, response
+        logging.getLogger(log_label(self)).info(
+                'request: uuid=%(sender_uuid)s command=%(command)s' % request)
         env['socks'][self.rpc_sock_name].send_multipart(data)
 
-    #def on__hello_world(self, env, multipart_message, uuid):
-        ## We received a request on the router socket, so we need to forward
-        ## the message to the master through the dealer socket.
-        #print datetime.now(), 'hello world', uuid
+    def on__broker_hello_world(self, env, multipart_message, uuid):
+        # We received a request on the router socket, so we need to forward
+        # the message to the master through the dealer socket.
+        message = '[%s] hello world (%s)' % (datetime.now(), uuid)
+        logging.getLogger(log_label(self)).info(message)
+        return message
 
     def send_response(self, socks, multipart_message, request, response):
         # Ignore first element (sender uuid)
@@ -108,7 +113,8 @@ class Broker(ZmqJsonRpcTask):
         data.insert(0, self.serialize_frame(response['timestamp']))
         data.append(error)
         data = multipart_message[:2] + data
-        print '[send_response]', data, request, response
+        logging.getLogger(log_label(self)).info(
+                'request: uuid=%(sender_uuid)s command=%(command)s' % request)
         socks[self.rpc_sock_name].send_multipart(data)
 
 
@@ -126,6 +132,7 @@ def parse_args():
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
     args = parse_args()
     b = Broker(args.dealer_uri, args.router_uri)
     b.run()

@@ -1,28 +1,31 @@
+import logging
 from collections import OrderedDict
-from datetime import datetime
+from uuid import uuid4
 
-import zmq
-from zmq.utils import jsonapi
+from zmq_helpers.rpc import ZmqJsonRpcProxy
+from zmq_helpers.utils import log_label
 
 
 class Worker(object):
-    def __init__(self, master_uri, master_bind=False, time_limit='5m',
+    def __init__(self, master_uri, uuid=None, time_limit='5m',
                  memory_limit='1G', n_procs=1, n_threads=1, control_pipe=None):
         self.uris = OrderedDict(master=master_uri)
-        self.binds = OrderedDict(master=master_bind)
         self.config = dict(time_limit=time_limit, memory_limit=memory_limit,
                            n_procs=n_procs, n_threads=n_threads)
+        if uuid is None:
+            self.uuid = str(uuid4())
+        else:
+            self.uuid = uuid
 
     def run(self):
-        ctx = zmq.Context.instance()
-        sock = zmq.Socket(ctx, zmq.REQ)
-        if self.binds['master']:
-            sock.bind(self.uris['master'])
-        else:
-            sock.connect(self.uris['master'])
-        json_data = map(jsonapi.dumps, ['%s' % datetime.now(), 'get_job', None, self.config])
-        sock.send_multipart(json_data)
-        print datetime.now(), map(jsonapi.loads, sock.recv_multipart())
+        master = ZmqJsonRpcProxy(self.uris['master'], uuid=self.uuid)
+        #print datetime.now(), master.get_job(**self.config)
+        logging.getLogger(log_label(self)).info(
+            'available handlers: %s' % (master.available_handlers(), ))
+        logging.getLogger(log_label(self)).info(
+            'hello world: %s' % (master.hello_world(), ))
+        logging.getLogger(log_label(self)).info(
+            'broker hello world: %s' % (master.broker_hello_world(), ))
 
 
 def parse_args():
@@ -41,6 +44,7 @@ def parse_args():
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
     args = parse_args()
     w = Worker(args.master_uri, time_limit=args.time_limit,
                memory_limit=args.memory_limit, n_procs=args.n_procs,

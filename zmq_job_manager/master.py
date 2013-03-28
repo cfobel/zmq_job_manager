@@ -1,9 +1,11 @@
+import logging
 from datetime import datetime
 from collections import OrderedDict
 
 import zmq
 from zmq_helpers.socket_configs import DeferredSocket
 from zmq_helpers.rpc import ZmqJsonRpcTask
+from zmq_helpers.utils import log_label
 
 
 class Master(ZmqJsonRpcTask):
@@ -17,7 +19,7 @@ class Master(ZmqJsonRpcTask):
 
     def on__hello_world(self, env, uuid):
         message = '[%s] hello world %s' % (datetime.now(), uuid)
-        print message
+        logging.getLogger(log_label(self)).info(message)
         env['socks']['pub'].send_multipart([message])
         return message
 
@@ -37,6 +39,7 @@ def parse_args():
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
     args = parse_args()
     m = Master(args.pub_uri, args.rep_uri)
     m.run()

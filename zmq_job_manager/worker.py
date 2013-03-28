@@ -23,6 +23,8 @@ class Worker(object):
         logging.getLogger(log_label(self)).info(
             'available handlers: %s' % (master.available_handlers(), ))
         logging.getLogger(log_label(self)).info(
+            'uris: %s' % (master.get_uris(), ))
+        logging.getLogger(log_label(self)).info(
             'hello world: %s' % (master.hello_world(), ))
         logging.getLogger(log_label(self)).info(
             'broker hello world: %s' % (master.broker_hello_world(), ))

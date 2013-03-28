@@ -5,24 +5,32 @@ from collections import OrderedDict
 import zmq
 from zmq_helpers.socket_configs import DeferredSocket
 from zmq_helpers.rpc import ZmqJsonRpcTask
-from zmq_helpers.utils import log_label
+from zmq_helpers.utils import log_label, get_public_ip
 
 
 class Master(ZmqJsonRpcTask):
-    def __init__(self, pub_uri, rpc_uri, *args, **kwargs):
+    def __init__(self, pub_uri, rpc_uri, hostname=None, **kwargs):
+        if hostname is None:
+            self.hostname = get_public_ip()
+        else:
+            self.hostname = hostname
         self._uris = OrderedDict(pub=pub_uri, rpc=rpc_uri)
-        super(Master, self).__init__(*args, **kwargs)
+        super(Master, self).__init__(**kwargs)
         self.sock_configs['pub'] = DeferredSocket(zmq.PUB).bind(pub_uri)
 
     def get_uris(self):
         return self._uris
+
+    def on__get_uris(self, *args, **kwargs):
+        return OrderedDict([(k, u.replace(r'tcp://*', r'tcp://%s' %
+                                          self.hostname))
+                            for k, u in self.get_uris().items()])
 
     def on__hello_world(self, env, uuid):
         message = '[%s] hello world %s' % (datetime.now(), uuid)
         logging.getLogger(log_label(self)).info(message)
         env['socks']['pub'].send_multipart([message])
         return message
-
 
 
 def parse_args():

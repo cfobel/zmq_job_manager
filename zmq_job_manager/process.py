@@ -59,15 +59,26 @@ class AsynchronousFileReaderIterator(threading.Thread):
 
 
 class DeferredPopen(object):
+    default_popen_class = subprocess.Popen
+
     def __init__(self, *args, **kwargs):
         self._args = args
         self._kwargs = kwargs
+        if 'popen_class' in kwargs:
+            self._popen_class = self._kwargs.pop('popen_class')
+        else:
+            self._popen_class = self.default_popen_class
 
     def make(self, *args, **kwargs):
         _args = self._args + args
         _kwargs = self._kwargs.copy()
         _kwargs.update(kwargs)
-        return subprocess.Popen(*_args, **_kwargs)
+        if 'popen_class' in _kwargs:
+            popen_class = _kwargs.pop('popen_class')
+        else:
+            popen_class = self._popen_class
+        print '[make]', _kwargs
+        return popen_class(*_args, **_kwargs)
 
 
 class PopenPipeReactor(subprocess.Popen):

@@ -1,4 +1,5 @@
 from datetime import datetime
+from collections import OrderedDict
 
 import zmq
 from zmq_helpers.socket_configs import DeferredSocket
@@ -6,10 +7,13 @@ from zmq_helpers.rpc import ZmqJsonRpcTask
 
 
 class Master(ZmqJsonRpcTask):
-    def __init__(self, pub_uri, *args, **kwargs):
+    def __init__(self, pub_uri, rpc_uri, *args, **kwargs):
+        self._uris = OrderedDict(pub=pub_uri, rpc=rpc_uri)
         super(Master, self).__init__(*args, **kwargs)
-        self.uris['pub'] = pub_uri
         self.sock_configs['pub'] = DeferredSocket(zmq.PUB).bind(pub_uri)
+
+    def get_uris(self):
+        return self._uris
 
     def on__hello_world(self, env, uuid):
         message = '[%s] hello world %s' % (datetime.now(), uuid)

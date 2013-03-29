@@ -51,7 +51,8 @@ class Worker(object):
                 'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
         logging.getLogger(log_label(self)).info(
             'register task: %s' % (master.register_task(shell_command), ))
-        self.run_task(master)
+        while master.pending_task_ids():
+            self.run_task(master)
         logging.getLogger(log_label(self)).info(
             'pending tasks: %s' % (master.pending_task_ids(), ))
         logging.getLogger(log_label(self)).info(

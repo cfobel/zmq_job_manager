@@ -99,10 +99,12 @@ class PopenPipeReactor(subprocess.Popen):
         # Check the queues if we received some output (until there is nothing more to get).
         while not self.stdout_reader.eof() or not self.stderr_reader.eof():
             message = ''.join(list(self.stdout_reader.iter()))
-            self.on_stdout(message.strip())
+            if message:
+                self.on_stdout(message.strip())
 
             message = ''.join(list(self.stderr_reader.iter()))
-            self.on_stderr(message.strip())
+            if message:
+                self.on_stderr(message.strip())
 
             # Sleep a bit before asking the readers again.
             time.sleep(.1)

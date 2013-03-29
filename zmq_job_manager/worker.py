@@ -1,9 +1,29 @@
+from threading import Thread
 import logging
 from collections import OrderedDict
 from uuid import uuid4
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
 
+from zmq.utils import jsonapi
 from zmq_helpers.rpc import ZmqJsonRpcProxy
 from zmq_helpers.utils import log_label
+
+from process import PopenPipeReactor
+
+
+class ProxyPopen(PopenPipeReactor):
+    def communicate(self, proxy):
+        self.proxy = proxy
+        super(ProxyPopen, self).communicate()
+
+    def on_stdout(self, value):
+        self.proxy.stdout(value)
+
+    def on_stderr(self, value):
+        self.proxy.stderr(value)
 
 
 class Worker(object):
@@ -19,7 +39,6 @@ class Worker(object):
 
     def run(self):
         master = ZmqJsonRpcProxy(self.uris['master'], uuid=self.uuid)
-        #print datetime.now(), master.get_job(**self.config)
         logging.getLogger(log_label(self)).info(
             'available handlers: %s' % (master.available_handlers(), ))
         logging.getLogger(log_label(self)).info(
@@ -28,7 +47,36 @@ class Worker(object):
             'hello world: %s' % (master.hello_world(), ))
         logging.getLogger(log_label(self)).info(
             'broker hello world: %s' % (master.broker_hello_world(), ))
+        shell_command = 'echo "[start] $(date)"; sleep 1; '\
+                'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
+        logging.getLogger(log_label(self)).info(
+            'register task: %s' % (master.register_task(shell_command), ))
+        self.run_task(master)
+        logging.getLogger(log_label(self)).info(
+            'pending tasks: %s' % (master.pending_task_ids(), ))
+        logging.getLogger(log_label(self)).info(
+            'running tasks: %s' % (master.running_task_ids(), ))
+        logging.getLogger(log_label(self)).info(
+            'completed tasks: %s' % (master.completed_task_ids(), ))
 
+    def run_task(self, master):
+        # Request a task from the master and run it in a subprocess, forwarding
+        # any `stdout` or `stderr` output to master.
+        d = pickle.loads(master.get_task())
+        logging.getLogger(log_label(self)).info('get_task: %s' % (d, ))
+        if d:
+            task_uuid, d = d
+            p = d.make(popen_class=ProxyPopen)
+            t = Thread(target=p.communicate, args=(master, ))
+            t.daemon = True
+            t.start()
+            while True:
+                # Run a loop here, to allow useful work while the subprocess is
+                # run in the background thread, `t`.
+                t.join(0.5)
+                if not t.isAlive():
+                    break
+            master.complete_task(task_uuid)
 
 def parse_args():
     """Parses arguments, returns (options, args)."""

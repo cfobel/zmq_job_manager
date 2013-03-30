@@ -109,11 +109,16 @@ class Master(ZmqJsonRpcTask):
             del self.completed_tasks[task_uuid]
             self.running_tasks[task_uuid] = t
 
-    def on__complete_task(self, env, uuid, task_uuid):
+    def on__complete_task(self, env, uuid, task_uuid, stop_epoch_seconds=None):
         if task_uuid in self.running_tasks:
             t = self.running_tasks[task_uuid]
             del self.running_tasks[task_uuid]
             self.completed_tasks[task_uuid] = t
+            if stop_epoch_seconds is None:
+                stop_epoch_seconds = (datetime.now() -
+                        datetime(1970,1,1)).total_seconds()
+            data = [uuid, task_uuid, 'complete_task', str(stop_epoch_seconds)]
+            env['socks']['pub'].send_multipart(data)
 
     def on__register_task(self, env, uuid, shell_command):
         task_uuid = str(uuid4())

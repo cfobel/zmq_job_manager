@@ -44,8 +44,6 @@ class Worker(object):
         logging.getLogger(log_label(self)).info(
             'uris: %s' % (master.get_uris(), ))
         logging.getLogger(log_label(self)).info(
-            'hello world: %s' % (master.hello_world(), ))
-        logging.getLogger(log_label(self)).info(
             'broker hello world: %s' % (master.broker_hello_world(), ))
         shell_command = 'echo "[start] $(date)"; sleep 1; '\
                 'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'

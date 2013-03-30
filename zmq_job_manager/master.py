@@ -30,6 +30,8 @@ class Master(ZmqJsonRpcTask):
         self.completed_tasks = OrderedDict()
         # Live worker uuids
         self.workers = set()
+        self.worker_by_task = OrderedDict()
+        self.task_by_worker = OrderedDict()
         # Pending worker requests
         self.worker_requests = OrderedDict()
 
@@ -57,9 +59,12 @@ class Master(ZmqJsonRpcTask):
         return message
 
     def _on__std_base(self, env, uuid, stream_name, value):
-        message = '[%s] uuid=%s\n%s' % (log_label(self), uuid, value)
-        env['socks']['pub'].send_multipart([uuid, stream_name, value])
-        return message
+        if uuid in self.task_by_worker:
+            task_uuid = self.task_by_worker[uuid]
+            message = '[%s] uuid=%s\n%s' % (log_label(self), uuid, value)
+            data = [uuid, task_uuid, stream_name, value]
+            env['socks']['pub'].send_multipart(data)
+            return message
 
     def on__running_task_ids(self, env, uuid):
         return self.running_tasks.keys()
@@ -70,12 +75,23 @@ class Master(ZmqJsonRpcTask):
     def on__completed_task_ids(self, env, uuid):
         return self.completed_tasks.keys()
 
+    def assign_task(self, worker_uuid, task_uuid, task):
+        if worker_uuid not in self.workers:
+            self.workers.add(worker_uuid)
+        self.worker_by_task[task_uuid] = worker_uuid
+        self.task_by_worker[worker_uuid] = task_uuid
+
+    def on__get_worker_task_uuid(self, env, uuid, worker_uuid):
+        return self.task_by_worker.get(worker_uuid)
+
+    def on__get_task_worker_uuid(self, env, uuid, task_uuid):
+        return self.worker_by_task.get(task_uuid)
+
     def on__get_task(self, env, uuid):
-        if uuid not in self.workers:
-            self.workers.add(uuid)
         if self.pending_tasks:
             result = self.pending_tasks.popitem(0)
             self.running_tasks[result[0]] = result[1]
+            self.assign_task(uuid, *result)
         else:
             result = None
         return pickle.dumps(result)
@@ -98,12 +114,6 @@ class Master(ZmqJsonRpcTask):
                                                       shell=True, stdout=PIPE,
                                                       stderr=PIPE)
         return task_uuid
-
-    def on__hello_world(self, env, uuid):
-        message = '[%s] hello world %s' % (datetime.now(), uuid)
-        logging.getLogger(log_label(self)).info(message)
-        env['socks']['pub'].send_multipart([message])
-        return message
 
     def on__queue_worker_request(self, env, uuid, worker_uuid, command, *args,
                                  **kwargs):

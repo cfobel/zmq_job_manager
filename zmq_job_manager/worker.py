@@ -1,3 +1,4 @@
+from datetime import datetime
 from threading import Thread
 import logging
 from collections import OrderedDict
@@ -12,6 +13,7 @@ from zmq_helpers.rpc import ZmqJsonRpcProxy
 from zmq_helpers.utils import log_label
 
 from process import PopenPipeReactor
+from constants import SERIALIZE__PICKLE
 
 
 class ProxyPopen(PopenPipeReactor):
@@ -75,7 +77,10 @@ class Worker(object):
                 t.join(0.5)
                 if not t.isAlive():
                     break
+            master.store('done', pickle.dumps(datetime.now()),
+                         serialization=SERIALIZE__PICKLE)
             master.complete_task(task_uuid)
+
 
 def parse_args():
     """Parses arguments, returns (options, args)."""

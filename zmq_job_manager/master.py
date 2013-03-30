@@ -14,6 +14,7 @@ from zmq_helpers.rpc import ZmqJsonRpcTask
 from zmq_helpers.utils import log_label, get_public_ip
 
 from process import DeferredPopen
+from constants import SERIALIZE__NONE, SERIALIZE__PICKLE, SERIALIZE__JSON
 
 
 class Master(ZmqJsonRpcTask):
@@ -43,10 +44,16 @@ class Master(ZmqJsonRpcTask):
                                           self.hostname))
                             for k, u in self.get_uris().items()])
 
-    def on__store(self, env, uuid, key, value):
-        message = '[%s] uuid=%s, %s=%s' % (log_label(self), uuid, key, value)
-        logging.getLogger(log_label(self)).info(message)
-        return message
+    def on__store(self, env, uuid, key, value, task_uuid=None,
+                  serialization=SERIALIZE__NONE):
+        if task_uuid is None and uuid in self.task_by_worker:
+            task_uuid = self.task_by_worker[uuid]
+        if task_uuid is not None:
+            message = '[%s] uuid=%s, %s=%s' % (log_label(self), uuid, key, value)
+            logging.getLogger(log_label(self)).info(message)
+            data = [uuid, task_uuid, 'store', serialization, key, value]
+            env['socks']['pub'].send_multipart(data)
+            return message
 
     def on__stdout(self, env, uuid, value):
         message = self._on__std_base(env, uuid, 'stdout', value)

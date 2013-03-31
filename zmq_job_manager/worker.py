@@ -67,7 +67,7 @@ class Worker(object):
     def run_task(self, master):
         # Request a task from the master and run it in a subprocess, forwarding
         # any `stdout` or `stderr` output to master.
-        d = pickle.loads(master.request_task())
+        d = pickle.loads(str(master.request_task()))
         logging.getLogger(log_label(self)).info('request_task: %s' % (d, ))
         if d:
             task_uuid, d = d

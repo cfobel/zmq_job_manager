@@ -63,14 +63,15 @@ class Worker(object):
     def run_task(self, master):
         # Request a task from the master and run it in a subprocess, forwarding
         # any `stdout` or `stderr` output to master.
-        d = pickle.loads(master.get_task())
-        logging.getLogger(log_label(self)).info('get_task: %s' % (d, ))
+        d = pickle.loads(master.request_task())
+        logging.getLogger(log_label(self)).info('request_task: %s' % (d, ))
         if d:
             task_uuid, d = d
             p = d.make(popen_class=ProxyPopen)
             t = Thread(target=p.communicate, args=(master, ))
             t.daemon = True
             t.start()
+            master.begin_task(task_uuid)
             while True:
                 # Run a loop here, to allow useful work while the subprocess is
                 # run in the background thread, `t`.

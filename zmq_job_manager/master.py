@@ -14,7 +14,11 @@ from zmq_helpers.rpc import ZmqJsonRpcTask
 from zmq_helpers.utils import log_label, get_public_ip
 
 from process import DeferredPopen
-from constants import SERIALIZE__NONE, SERIALIZE__PICKLE, SERIALIZE__JSON
+from constants import SERIALIZE__NONE
+
+
+def get_seconds_since_epoch():
+    return (datetime.now() - datetime(1970,1,1)).total_seconds()
 
 
 class Master(ZmqJsonRpcTask):
@@ -44,6 +48,10 @@ class Master(ZmqJsonRpcTask):
                                           self.hostname))
                             for k, u in self.get_uris().items()])
 
+    def publish(self, env, uuid, task_uuid, command, *args):
+        data = [uuid, task_uuid, '%.6f' % get_seconds_since_epoch(), command] + list(args)
+        env['socks']['pub'].send_multipart(data)
+
     def on__store(self, env, uuid, key, value, task_uuid=None,
                   serialization=SERIALIZE__NONE):
         if task_uuid is None and uuid in self.task_by_worker:
@@ -51,8 +59,7 @@ class Master(ZmqJsonRpcTask):
         if task_uuid is not None:
             message = '[%s] uuid=%s, %s=%s' % (log_label(self), uuid, key, value)
             logging.getLogger(log_label(self)).info(message)
-            data = [uuid, task_uuid, 'store', serialization, key, value]
-            env['socks']['pub'].send_multipart(data)
+            self.publish(env, uuid, task_uuid, 'store', serialization, key, value)
             return message
 
     def on__stdout(self, env, uuid, value):
@@ -69,8 +76,7 @@ class Master(ZmqJsonRpcTask):
         if uuid in self.task_by_worker:
             task_uuid = self.task_by_worker[uuid]
             message = '[%s] uuid=%s\n%s' % (log_label(self), uuid, value)
-            data = [uuid, task_uuid, stream_name, value]
-            env['socks']['pub'].send_multipart(data)
+            self.publish(env, uuid, task_uuid, stream_name, value)
             return message
 
     def on__running_task_ids(self, env, uuid):
@@ -94,7 +100,22 @@ class Master(ZmqJsonRpcTask):
     def on__get_task_worker_uuid(self, env, uuid, task_uuid):
         return self.worker_by_task.get(task_uuid)
 
-    def on__get_task(self, env, uuid):
+    def on__get_task_command(self, env, uuid, task_uuid):
+        tasks = getattr(self, '%s_tasks' % self.on__get_task_state(env, uuid,
+                                                                   task_uuid))
+        return tasks[task_uuid]._args[0]
+
+    def on__get_task_state(self, env, uuid, task_uuid):
+        if task_uuid in self.pending_tasks:
+            return 'pending'
+        elif task_uuid in self.running_tasks:
+            return 'running'
+        elif task_uuid in self.completed_tasks:
+            return 'completed'
+        else:
+            raise KeyError, 'No task found for uuid: %s' % task_uuid
+
+    def on__request_task(self, env, uuid):
         if self.pending_tasks:
             result = self.pending_tasks.popitem(0)
             self.running_tasks[result[0]] = result[1]
@@ -103,22 +124,28 @@ class Master(ZmqJsonRpcTask):
             result = None
         return pickle.dumps(result)
 
+    def on__begin_task(self, env, uuid, task_uuid, seconds_since_epoch=None):
+        if task_uuid in self.running_tasks:
+            if seconds_since_epoch is None:
+                seconds_since_epoch = get_seconds_since_epoch()
+            self.publish(env, uuid, task_uuid, 'begin_task',
+                         '%.6f' % seconds_since_epoch)
+
     def on__uncomplete_task(self, env, uuid, task_uuid):
         if task_uuid in self.completed_tasks:
             t = self.completed_tasks[task_uuid]
             del self.completed_tasks[task_uuid]
             self.running_tasks[task_uuid] = t
 
-    def on__complete_task(self, env, uuid, task_uuid, stop_epoch_seconds=None):
+    def on__complete_task(self, env, uuid, task_uuid, seconds_since_epoch=None):
         if task_uuid in self.running_tasks:
             t = self.running_tasks[task_uuid]
             del self.running_tasks[task_uuid]
             self.completed_tasks[task_uuid] = t
-            if stop_epoch_seconds is None:
-                stop_epoch_seconds = (datetime.now() -
-                        datetime(1970,1,1)).total_seconds()
-            data = [uuid, task_uuid, 'complete_task', str(stop_epoch_seconds)]
-            env['socks']['pub'].send_multipart(data)
+            if seconds_since_epoch is None:
+                seconds_since_epoch = get_seconds_since_epoch()
+            self.publish(env, uuid, task_uuid, 'complete_task',
+                         '%.6f' % seconds_since_epoch)
 
     def on__register_task(self, env, uuid, shell_command):
         task_uuid = str(uuid4())

@@ -100,11 +100,11 @@ class PopenPipeReactor(subprocess.Popen):
         while not self.stdout_reader.eof() or not self.stderr_reader.eof():
             message = ''.join(list(self.stdout_reader.iter()))
             if message:
-                self.on_stdout(message.strip())
+                self.on_stdout(message)
 
             message = ''.join(list(self.stderr_reader.iter()))
             if message:
-                self.on_stderr(message.strip())
+                self.on_stderr(message)
 
             # Sleep a bit before asking the readers again.
             time.sleep(.1)

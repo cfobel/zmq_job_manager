@@ -124,15 +124,6 @@ class WorkersSink(ZmqJsonRpcTask):
             sock_configs['sub'].setsockopt(zmq.SUBSCRIBE, self._init_subscribe)
         return sock_configs
 
-    def sub__store(self, message, serialization, key, value):
-        if serialization == 'SERIALIZE__PICKLE':
-            value = pickle.loads(value)
-
-        db_path = '/data/%s/%s/%s' % (message.worker_uuid, message.task_uuid,
-                                      key)
-        self._save_to_db(db_path, value)
-        logging.getLogger(log_label(self)).info('key=%s value=%s', key, value)
-
     def _message_data_dir(self, message, make=True):
         return self._task_data_dir(message.worker_uuid, message.task_uuid, make)
 
@@ -157,10 +148,25 @@ class WorkersSink(ZmqJsonRpcTask):
         self._on__std_base(message, data, 'stderr')
 
     def sub__begin_task(self, message, data):
+        db_path = '/data/%s/%s/__begin_task__' % (message.worker_uuid,
+                                                  message.task_uuid)
+        self._save_to_db(db_path, datetime.utcfromtimestamp(float(data)))
         logging.getLogger(log_label(self)).info(data)
 
     def sub__complete_task(self, message, data):
+        db_path = '/data/%s/%s/__complete_task__' % (message.worker_uuid,
+                                                     message.task_uuid)
+        self._save_to_db(db_path, datetime.utcfromtimestamp(float(data)))
         logging.getLogger(log_label(self)).info(data)
+
+    def sub__store(self, message, serialization, key, value):
+        if serialization == 'SERIALIZE__PICKLE':
+            value = pickle.loads(value)
+
+        db_path = '/data/%s/%s/%s' % (message.worker_uuid, message.task_uuid,
+                                      key)
+        self._save_to_db(db_path, value)
+        logging.getLogger(log_label(self)).info('key=%s value=%s', key, value)
 
     def process_sub_message(self, env, multipart_message):
         message = SubMessage.from_multipart_message(multipart_message)

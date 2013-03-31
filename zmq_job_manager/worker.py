@@ -11,6 +11,7 @@ except ImportError:
 from zmq.utils import jsonapi
 from zmq_helpers.rpc import ZmqJsonRpcProxy
 from zmq_helpers.utils import log_label
+from cpu_info.cpu_info import cpu_info, cpu_summary
 
 from process import PopenPipeReactor
 from constants import SERIALIZE__PICKLE
@@ -41,6 +42,9 @@ class Worker(object):
 
     def run(self):
         master = ZmqJsonRpcProxy(self.uris['master'], uuid=self.uuid)
+        master.store('__cpu_summary__', cpu_summary())
+        master.store('__cpu_info__', pickle.dumps(cpu_info()),
+                        serialization=SERIALIZE__PICKLE)
         logging.getLogger(log_label(self)).info(
             'available handlers: %s' % (master.available_handlers(), ))
         logging.getLogger(log_label(self)).info(

@@ -3,9 +3,28 @@ from collections import OrderedDict
 from datetime import datetime
 
 import zmq
+from zmq.eventloop.ioloop import PeriodicCallback
 from zmq_helpers.socket_configs import DeferredSocket
 from zmq_helpers.rpc import ZmqJsonRpcTask, ZmqJsonRpcProxy
 from zmq_helpers.utils import log_label
+
+
+class WorkerState(object):
+    def __init__(self, uuid, task_uuid=None, heartbeat_count=None):
+        self._uuid = uuid
+        self._request_queue = []
+        self._task_uuid = task_uuid
+        self._heartbeat_count = heartbeat_count
+
+    def reset_heartbeat(self, value=None):
+        old_value = getattr(self, '_starting_heartbeat_count', None)
+        if value is None:
+            if old_value is None:
+                raise ValueError, 'No initial value provided for heartbeat count.'
+            value = old_value
+        logging.getLogger(log_label(self)).info('reset_heartbeat %s', value)
+        self._heartbeat_count = value
+        self._starting_heartbeat_count = value
 
 
 class Broker(ZmqJsonRpcTask):
@@ -14,12 +33,55 @@ class Broker(ZmqJsonRpcTask):
         self._uris['rpc'] = router_uri
         self._uris['dealer'] = dealer_uri
         self._remote_handlers = set()
-        self._pending_requests = {}
+        self._data = None
         super(Broker, self).__init__(on_run=self.on_run, **kwargs)
+
+    def _monitor_heartbeats(self, *args, **kwargs):
+        for uuid, worker in self._data['worker_states'].iteritems():
+            heartbeat_count = worker._heartbeat_count
+            if heartbeat_count is not None:
+                heartbeat_count -= 1
+                if heartbeat_count <= 0:
+                    # This process has missed the maximum number of expected
+                    # heartbeats, so add to list of dead workers.
+                    self._data['workers']['dead'][uuid] = worker
+                print log_label(self), 'heartbeat_count:', uuid, heartbeat_count
+        print log_label(self), datetime.now()
+
+    def _initial_data(self):
+        '''
+        By initializing data using a method, the broker may be sub-classed to,
+        for example, provide persistent storage, allowing the process to be
+        stopped and restarted while maintaining state.
+        '''
+        data = {
+            # Worker mappings based on state.  Note that a worker may be
+            # present in more than one mapping.  All mappings are indexed by
+            # worker uuid.
+            'workers': {
+                # Worker
+                'pending_create': OrderedDict(),
+                'pending_terminate': OrderedDict(),
+                'running': OrderedDict(),
+                'completed': OrderedDict(),
+                'terminated': OrderedDict(),
+                'dead': OrderedDict(),
+            },
+            # The state of each worker, with respect to the worker's uuid, the
+            # assigned task's uuid, the worker's request queue, and the
+            # worker's heartbeat count.  The `worker_states` mapping is indexed
+            # by worker uuid.
+            'worker_states': OrderedDict(worker1=WorkerState('worker1', 'task1', 5)),
+        }
+        return data
 
     def on_run(self, ctx, io_loop, socks, streams):
         z = ZmqJsonRpcProxy(self._uris['dealer'])
+        self._data = self._initial_data()
         self._remote_handlers = set(z.available_handlers())
+        callback = PeriodicCallback(self._monitor_heartbeats, 1000,
+                                    io_loop=io_loop)
+        callback.start()
 
     def on__available_handlers(self, env, *args, **kwargs):
         return sorted(set(self.handler_methods.keys()).union(self._remote_handlers))
@@ -41,6 +103,9 @@ class Broker(ZmqJsonRpcTask):
 
     def call_handler(self, handler, env, multipart_message, request):
         # Add `multipart_message` argument to handler call.
+        sender_uuid = request['sender_uuid']
+        if sender_uuid in self._data['worker_states']:
+            self._data['worker_states'][sender_uuid].reset_heartbeat()
         return handler(env, multipart_message, request['sender_uuid'],
                     *request['args'], **request['kwargs'])
 

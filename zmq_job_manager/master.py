@@ -131,6 +131,26 @@ class Master(ZmqJsonRpcTask):
             self.publish(env, uuid, task_uuid, 'begin_task',
                          '%.6f' % seconds_since_epoch)
 
+    def on__terminate_worker(self, env, uuid, seconds_since_epoch=None):
+        self._publish_with_time_float(env, uuid, '', 'terminated_worker',
+                                      seconds_since_epoch)
+
+    def on__flatlined_worker(self, env, uuid, seconds_since_epoch=None):
+        self._publish_with_time_float(env, uuid, '', 'flatlined_worker',
+                                      seconds_since_epoch)
+
+    def on__revived_worker(self, env, uuid, seconds_since_epoch=None):
+        self._publish_with_time_float(env, uuid, '', 'revived_worker',
+                                      seconds_since_epoch)
+
+    def _publish_with_time_float(self, env, worker_uuid, task_uuid, command,
+                                 seconds_since_epoch=None):
+        if seconds_since_epoch is None:
+            seconds_since_epoch = get_seconds_since_epoch()
+        self.publish(env, worker_uuid, task_uuid, command, '%.6f' %
+                     seconds_since_epoch)
+
+
     def on__uncomplete_task(self, env, uuid, task_uuid):
         if task_uuid in self.completed_tasks:
             t = self.completed_tasks[task_uuid]

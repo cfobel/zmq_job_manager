@@ -1,14 +1,17 @@
+from multiprocessing import Pipe
 from datetime import datetime
 from threading import Thread
 import logging
 from collections import OrderedDict
 from uuid import uuid4
+import time
 try:
     import cPickle as pickle
 except ImportError:
     import pickle
 
-from zmq.utils import jsonapi
+from zmq.eventloop.ioloop import IOLoop, PeriodicCallback
+
 from zmq_helpers.rpc import ZmqJsonRpcProxy
 from zmq_helpers.utils import log_label
 from cpu_info.cpu_info import cpu_info, cpu_summary
@@ -31,7 +34,7 @@ class ProxyPopen(PopenPipeReactor):
 
 class Worker(object):
     def __init__(self, master_uri, uuid=None, time_limit='5m',
-                 memory_limit='1G', n_procs=1, n_threads=1, control_pipe=None):
+                 memory_limit='1G', n_procs=1, n_threads=1):
         self.uris = OrderedDict(master=master_uri)
         self.config = dict(time_limit=time_limit, memory_limit=memory_limit,
                            n_procs=n_procs, n_threads=n_threads)
@@ -70,18 +73,60 @@ class Worker(object):
         d = pickle.loads(str(master.request_task()))
         logging.getLogger(log_label(self)).info('request_task: %s' % (d, ))
         if d:
+            # Run an IO-loop here, to allow useful work while the subprocess is
+            # run in the background thread, `t`.
             task_uuid, d = d
             p = d.make(popen_class=ProxyPopen)
             t = Thread(target=p.communicate, args=(master, ))
             t.daemon = True
             t.start()
-            master.begin_task(task_uuid)
-            while True:
-                # Run a loop here, to allow useful work while the subprocess is
-                # run in the background thread, `t`.
-                t.join(0.5)
+            io_loop = IOLoop()
+            parent, child = Pipe()
+
+            def timer__completed():
+                '''
+                If the subprocess has finished, stop the IO-loop to exit
+                gracefully.
+                '''
                 if not t.isAlive():
-                    break
+                    child.send('STOP')
+                else:
+                    t.join(0.01)
+
+            def timer__watchdog():
+                '''
+                If there is a request to stop the IO-loop, do so.
+                '''
+                if parent.poll():
+                    io_loop.stop()
+
+            def timer__heartbeat():
+                '''
+                Send a heartbeat request to the broker to notify that we are
+                still alive.
+                '''
+                master.heartbeat()
+
+            callbacks = OrderedDict()
+            callbacks['heartbeat'] = PeriodicCallback(timer__heartbeat, 4000,
+                                                      io_loop=io_loop)
+            callbacks['watchdog'] = PeriodicCallback(timer__watchdog, 500,
+                                                     io_loop=io_loop)
+            callbacks['completed'] = PeriodicCallback(timer__completed, 500,
+                                                      io_loop=io_loop)
+            def _on_run():
+                for c in callbacks.values():
+                    c.start()
+                    time.sleep(0.1)
+                master.begin_task(task_uuid)
+
+            io_loop.add_callback(_on_run)
+
+            try:
+                io_loop.start()
+            except KeyboardInterrupt:
+                pass
+
             master.store('done', pickle.dumps(datetime.now()),
                          serialization=SERIALIZE__PICKLE)
             master.complete_task(task_uuid)

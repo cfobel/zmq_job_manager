@@ -1,6 +1,7 @@
 import logging
 from collections import OrderedDict
 from datetime import datetime
+import functools
 
 import zmq
 from zmq.eventloop.ioloop import PeriodicCallback
@@ -23,7 +24,7 @@ class WorkerState(object):
             if old_value is None:
                 raise ValueError, 'No initial value provided for heartbeat count.'
             value = old_value
-        logging.getLogger(log_label(self)).info('reset_heartbeat %s', value)
+        logging.getLogger(log_label(self)).debug('reset_heartbeat %s', value)
         self._heartbeat_count = value
         self._starting_heartbeat_count = value
 
@@ -37,7 +38,29 @@ class Broker(ZmqJsonRpcTask):
         self._data = None
         super(Broker, self).__init__(on_run=self.on_run, **kwargs)
 
-    def _monitor_heartbeats(self, *args, **kwargs):
+    def timer__grim_reaper(self, env, *args, **kwargs):
+        for workers_set in ('pending_terminate', 'flatlined'):
+            for uuid, worker in self._data['workers'][workers_set].iteritems():
+                self.terminate_worker(env, uuid)
+
+    def terminate_worker(self, env, worker_uuid):
+        '''
+        Terminate worker externally (i.e., workers that are no longer
+        responding), since we cannot worker would not respond to a request to
+        shutdown gracefully.
+
+        By default, nothing is done except removing the worker from the
+        `pending_terminate` set, but the sub-classes may implement
+        `terminate_worker(self, env, uuid)` accordingly.
+        '''
+        z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=worker_uuid)
+        if worker_uuid in self._data['workers']['pending_terminate']:
+            del self._data['workers']['pending_terminate'][worker_uuid]
+            z.terminated_worker()
+        if worker_uuid in self._data['workers']['flatlined']:
+            z.flatlined_worker()
+
+    def timer__monitor_heartbeats(self, *args, **kwargs):
         for uuid, worker in self._data['worker_states'].iteritems():
             heartbeat_count = worker._heartbeat_count
             if heartbeat_count is not None:
@@ -47,26 +70,28 @@ class Broker(ZmqJsonRpcTask):
                 heartbeat_count -= 1
                 if heartbeat_count <= 0:
                     # This process has missed the maximum number of expected
-                    # heartbeats, so add to list of dead workers.
-                    self._data['workers']['dead'][uuid] = worker
+                    # heartbeats, so add to list of flatlined workers.
+                    self._data['workers']['flatlined'][uuid] = worker
                     if heartbeat_count == 0:
-                        print log_label(self), 'worker has flatlined (i.e., '\
-                                'heartbeat_count=%d): %s' % (heartbeat_count,
-                                                             uuid)
-                else:
-                    print log_label(self), 'heartbeat_count:', uuid, \
-                            heartbeat_count
+                        logging.getLogger(log_label(self)).info(
+                            'worker has flatlined (i.e., heartbeat_count=%d):'
+                            ' %s' % (heartbeat_count, uuid)
+                        )
                 worker._heartbeat_count = heartbeat_count
-        for uuid, worker in self._data['workers']['dead'].iteritems():
+
+        for uuid, worker in self._data['workers']['flatlined'].iteritems():
             if worker._heartbeat_count is not None\
                     and worker._heartbeat_count > 0:
                 # A worker has come back to life!  Update the worker mappings
                 # accordingly.
                 self._data['workers']['running'][uuid] = worker
-                del self._data['workers']['dead'][uuid]
-                print log_label(self), 'worker_revived - heartbeat_count:',\
-                        uuid, heartbeat_count
-        print log_label(self), datetime.now()
+                del self._data['workers']['flatlined'][uuid]
+                logging.getLogger(log_label(self)).info(
+                    'worker %s has revived - heartbeat_count=%d'
+                    % (uuid, heartbeat_count)
+                )
+                z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=uuid)
+                z.revived_worker()
 
     def _initial_data(self):
         '''
@@ -85,7 +110,7 @@ class Broker(ZmqJsonRpcTask):
                 'running': OrderedDict(),
                 'completed': OrderedDict(),
                 'terminated': OrderedDict(),
-                'dead': OrderedDict(),
+                'flatlined': OrderedDict(),
             },
             # The state of each worker, with respect to the worker's uuid, the
             # assigned task's uuid, the worker's request queue, and the
@@ -99,9 +124,25 @@ class Broker(ZmqJsonRpcTask):
         z = ZmqJsonRpcProxy(self._uris['dealer'])
         self._data = self._initial_data()
         self._remote_handlers = set(z.available_handlers())
-        callback = PeriodicCallback(self._monitor_heartbeats, 1000,
-                                    io_loop=io_loop)
+        env = OrderedDict([
+            ('ctx', ctx),
+            ('io_loop', io_loop),
+            ('socks', socks),
+            ('streams', streams),
+        ])
+        f = functools.partial(self.timer__monitor_heartbeats, env)
+        callback = PeriodicCallback(f, 1000, io_loop=io_loop)
         callback.start()
+        f = functools.partial(self.timer__grim_reaper, env)
+        callback = PeriodicCallback(f, 5000, io_loop=io_loop)
+        callback.start()
+
+    def on__heartbeat(self, env, multipart_message, uuid):
+        '''
+        Do nothing here, since heart-beat count is reset in the `call_handler`
+        method.
+        '''
+        return True
 
     def on__available_handlers(self, env, *args, **kwargs):
         return sorted(

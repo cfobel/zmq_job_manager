@@ -14,7 +14,8 @@ class WorkerState(object):
         self._uuid = uuid
         self._request_queue = []
         self._task_uuid = task_uuid
-        self._heartbeat_count = heartbeat_count
+        self._starting_heartbeat_count = heartbeat_count
+        self._heartbeat_count = None
 
     def reset_heartbeat(self, value=None):
         old_value = getattr(self, '_starting_heartbeat_count', None)
@@ -40,12 +41,31 @@ class Broker(ZmqJsonRpcTask):
         for uuid, worker in self._data['worker_states'].iteritems():
             heartbeat_count = worker._heartbeat_count
             if heartbeat_count is not None:
+                # If `heartbeat_count` is `None`, the heart-beat has not been
+                # started.  We only process the heart-beat after it has been
+                # started.
                 heartbeat_count -= 1
                 if heartbeat_count <= 0:
                     # This process has missed the maximum number of expected
                     # heartbeats, so add to list of dead workers.
                     self._data['workers']['dead'][uuid] = worker
-                print log_label(self), 'heartbeat_count:', uuid, heartbeat_count
+                    if heartbeat_count == 0:
+                        print log_label(self), 'worker has flatlined (i.e., '\
+                                'heartbeat_count=%d): %s' % (heartbeat_count,
+                                                             uuid)
+                else:
+                    print log_label(self), 'heartbeat_count:', uuid, \
+                            heartbeat_count
+                worker._heartbeat_count = heartbeat_count
+        for uuid, worker in self._data['workers']['dead'].iteritems():
+            if worker._heartbeat_count is not None\
+                    and worker._heartbeat_count > 0:
+                # A worker has come back to life!  Update the worker mappings
+                # accordingly.
+                self._data['workers']['running'][uuid] = worker
+                del self._data['workers']['dead'][uuid]
+                print log_label(self), 'worker_revived - heartbeat_count:',\
+                        uuid, heartbeat_count
         print log_label(self), datetime.now()
 
     def _initial_data(self):
@@ -60,7 +80,7 @@ class Broker(ZmqJsonRpcTask):
             # worker uuid.
             'workers': {
                 # Worker
-                'pending_create': OrderedDict(),
+                'pending_create': set(),
                 'pending_terminate': OrderedDict(),
                 'running': OrderedDict(),
                 'completed': OrderedDict(),
@@ -71,7 +91,7 @@ class Broker(ZmqJsonRpcTask):
             # assigned task's uuid, the worker's request queue, and the
             # worker's heartbeat count.  The `worker_states` mapping is indexed
             # by worker uuid.
-            'worker_states': OrderedDict(worker1=WorkerState('worker1', 'task1', 5)),
+            'worker_states': OrderedDict(),
         }
         return data
 
@@ -84,7 +104,17 @@ class Broker(ZmqJsonRpcTask):
         callback.start()
 
     def on__available_handlers(self, env, *args, **kwargs):
-        return sorted(set(self.handler_methods.keys()).union(self._remote_handlers))
+        return sorted(
+            set(self.handler_methods.keys()).union(self._remote_handlers)
+        )
+
+    def on__begin_task(self, env, multipart_message, uuid, task_uuid,
+                       **kwargs):
+        self._data['worker_states'] = OrderedDict()
+        self._data['worker_states'][uuid] = WorkerState(uuid, task_uuid, 5)
+        z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=uuid)
+        result = z.begin_task(task_uuid, **kwargs)
+        return result
 
     def get_handler(self, command):
         '''

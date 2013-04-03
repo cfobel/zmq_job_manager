@@ -51,8 +51,8 @@ class Worker(object):
             'uris: %s' % (master.get_uris(), ))
         logging.getLogger(log_label(self)).info(
             'broker hello world: %s' % (master.broker_hello_world(), ))
-        shell_command = 'echo "[start] $(date)"; sleep 1; '\
-                'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
+        shell_command = 'echo "[start] $(date)"; sleep 5; '\
+                'echo "[mid] $(date)"; sleep 5; echo "[end] $(date)";'
         logging.getLogger(log_label(self)).info(
             'register task: %s' % (master.register_task(shell_command), ))
         while master.pending_task_ids():

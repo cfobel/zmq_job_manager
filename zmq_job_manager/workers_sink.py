@@ -15,6 +15,7 @@ from path import path
 from persistent_helpers.ordered_dict import PersistentOrderedDict
 from ZODB import DB
 from ZEO import ClientStorage
+from BTrees.OOBTree import OOBTree
 
 
 class SubMessage(object):
@@ -104,10 +105,10 @@ class WorkersSink(ZmqJsonRpcTask):
         for i in range(3):
             try:
                 db_path = path(db_path)
-                node = self._get_db_node(db_path.parent)
-                node[db_path.name] = value
+                node = self._get_db_node(str(db_path.parent))
+                node[str(db_path.name)] = value
                 transaction.commit()
-                return
+                return node
             except:
                 self._reset_db()
         raise
@@ -148,24 +149,40 @@ class WorkersSink(ZmqJsonRpcTask):
         self._on__std_base(message, data, 'stderr')
 
     def sub__begin_task(self, message, data):
-        db_path = '/data/%s/%s/__begin_task__' % (message.worker_uuid,
-                                                  message.task_uuid)
-        self._save_to_db(db_path, datetime.utcfromtimestamp(float(data)))
         logging.getLogger(log_label(self)).info(data)
 
     def sub__complete_task(self, message, data):
-        db_path = '/data/%s/%s/__complete_task__' % (message.worker_uuid,
-                                                     message.task_uuid)
-        self._save_to_db(db_path, datetime.utcfromtimestamp(float(data)))
+        self.save(message.worker_uuid, message.task_uuid, '__complete_task__',
+                  datetime.utcfromtimestamp(float(data)))
         logging.getLogger(log_label(self)).info(data)
+
+    def save(self, worker_uuid, task_uuid, key, value):
+        logging.getLogger(log_label(self)).info(self._root.keys())
+        db_path = '/data/%s/%s/%s' % (worker_uuid, task_uuid, key)
+        parent_node = self._save_to_db(db_path, value)
+        if 'task_by_uuid' not in self._root or task_uuid not in self._root['task_by_uuid']:
+            db_path = '/task_by_uuid/%s' % task_uuid
+            self._save_to_db(db_path, parent_node)
+            # Since we are referencing the same data item multiple times,
+            # if we do not conduct a `pack` of the database, the file size will
+            # grow according to a multiple of the database size.
+            self._db.pack()
+        if 'datetime_by_task_uuid' not in self._root\
+                or task_uuid not in self._root['datetime_by_task_uuid']:
+            db_path = '/datetime_by_task_uuid/%s' % task_uuid
+            now = datetime.now()
+            self._save_to_db(db_path, now)
+            self._db.pack()
+            task_uuid_by_datetime = self._root.setdefault('task_uuid_by_datetime', OOBTree())
+            task_uuid_by_datetime[now] = task_uuid
+            transaction.commit()
+            self._db.pack()
+        logging.getLogger(log_label(self)).info(self._root.keys())
 
     def sub__store(self, message, serialization, key, value):
         if serialization == 'SERIALIZE__PICKLE':
             value = pickle.loads(value)
-
-        db_path = '/data/%s/%s/%s' % (message.worker_uuid, message.task_uuid,
-                                      key)
-        self._save_to_db(db_path, value)
+        self.save(message.worker_uuid, message.task_uuid, key, value)
         logging.getLogger(log_label(self)).info('key=%s value=%s', key, value)
 
     def process_sub_message(self, env, multipart_message):

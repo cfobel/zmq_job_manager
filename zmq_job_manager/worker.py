@@ -16,8 +16,8 @@ from zmq_helpers.rpc import ZmqJsonRpcProxy
 from zmq_helpers.utils import log_label
 from cpu_info.cpu_info import cpu_info, cpu_summary
 
-from process import PopenPipeReactor
-from constants import SERIALIZE__PICKLE
+from .process import PopenPipeReactor
+from .constants import SERIALIZE__PICKLE
 
 
 class ProxyPopen(PopenPipeReactor):
@@ -54,8 +54,8 @@ class Worker(object):
             'uris: %s' % (master.get_uris(), ))
         logging.getLogger(log_label(self)).info(
             'broker hello world: %s' % (master.broker_hello_world(), ))
-        shell_command = 'echo "[start] $(date)"; sleep 5; '\
-                'echo "[mid] $(date)"; sleep 5; echo "[end] $(date)";'
+        shell_command = 'echo "[start] $(date)"; sleep 1; '\
+                'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
         logging.getLogger(log_label(self)).info(
             'register task: %s' % (master.register_task(shell_command), ))
         while master.pending_task_ids():
@@ -138,6 +138,8 @@ def parse_args():
 
     parser = ArgumentParser(description='''Worker demo''')
     parser.add_argument(nargs=1, dest='master_uri', type=str)
+    parser.add_argument(nargs='?', dest='worker_uuid', type=str,
+                        default=str(uuid4()))
     parser.add_argument(nargs='?', dest='time_limit', default='5m')
     parser.add_argument(nargs='?', dest='memory_limit', default='1G')
     parser.add_argument(nargs='?', dest='n_procs', type=int, default=1)
@@ -150,7 +152,8 @@ def parse_args():
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     args = parse_args()
-    w = Worker(args.master_uri, time_limit=args.time_limit,
+    w = Worker(args.master_uri, uuid=args.worker_uuid,
+               time_limit=args.time_limit,
                memory_limit=args.memory_limit, n_procs=args.n_procs,
                n_threads=args.n_threads)
     w.run()

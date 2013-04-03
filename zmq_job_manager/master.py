@@ -13,8 +13,8 @@ from zmq_helpers.socket_configs import DeferredSocket
 from zmq_helpers.rpc import ZmqJsonRpcTask
 from zmq_helpers.utils import log_label, get_public_ip
 
-from process import DeferredPopen
-from constants import SERIALIZE__NONE
+from .process import DeferredPopen
+from .constants import SERIALIZE__NONE
 
 
 def get_seconds_since_epoch():
@@ -149,7 +149,6 @@ class Master(ZmqJsonRpcTask):
             seconds_since_epoch = get_seconds_since_epoch()
         self.publish(env, worker_uuid, task_uuid, command, '%.6f' %
                      seconds_since_epoch)
-
 
     def on__uncomplete_task(self, env, uuid, task_uuid):
         if task_uuid in self.completed_tasks:

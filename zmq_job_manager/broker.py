@@ -2,6 +2,7 @@ import logging
 from collections import OrderedDict
 from datetime import datetime
 import functools
+from uuid import uuid1
 
 import zmq
 from zmq.eventloop.ioloop import PeriodicCallback
@@ -29,14 +30,14 @@ class WorkerState(object):
         self._starting_heartbeat_count = value
 
 
-class Broker(ZmqJsonRpcTask):
+class BrokerBase(ZmqJsonRpcTask):
     def __init__(self, dealer_uri, router_uri, dealer_bind=False, **kwargs):
         self._uris = OrderedDict()
         self._uris['rpc'] = router_uri
         self._uris['dealer'] = dealer_uri
         self._remote_handlers = set()
         self._data = None
-        super(Broker, self).__init__(on_run=self.on_run, **kwargs)
+        super(BrokerBase, self).__init__(on_run=self.on_run, **kwargs)
 
     def _initial_data(self):
         '''
@@ -49,12 +50,19 @@ class Broker(ZmqJsonRpcTask):
             # present in more than one mapping.  All mappings are indexed by
             # worker uuid.
             'workers': {
-                # Worker
+                # Worker creation requested (but not completed/verified)
                 'pending_create': set(),
+                # Worker termination requested (but not completed/verified)
                 'pending_terminate': OrderedDict(),
+                # Worker running (i.e., we've received a request from the
+                # worker)
                 'running': OrderedDict(),
+                # Worker has finished running and has sent a `complete_task`
+                # reqeust.
                 'completed': OrderedDict(),
-                'terminated': OrderedDict(),
+                'terminated': set(),
+                # We haven't received any request (including heart-beat) from
+                # the worker in 5 heart-beat interval counts.
                 'flatlined': OrderedDict(),
             },
             # The state of each worker, with respect to the worker's uuid, the
@@ -96,11 +104,23 @@ class Broker(ZmqJsonRpcTask):
         return result
 
     def on__broker_hello_world(self, env, multipart_message, uuid):
-        # We received a request on the router socket, so we need to forward
-        # the message to the master through the dealer socket.
         message = '[%s] hello world (%s)' % (datetime.now(), uuid)
         logging.getLogger(log_label(self)).info(message)
         return message
+
+    def on__create_worker(self, env, multipart_message, uuid, *args, **kwargs):
+        '''
+        Create a new worker and return the worker's uuid.
+        '''
+        new_worker_uuid = kwargs.pop('worker_uuid', None)
+        if new_worker_uuid is None:
+            new_worker_uuid = str(uuid1())
+        message = '[%s] create worker (%s)' % (datetime.now(), new_worker_uuid)
+        result = self.create_worker(env, new_worker_uuid, *args, **kwargs)
+        if result:
+            logging.getLogger(log_label(self)).info(message)
+            self._data['workers']['pending_create'].add(result)
+        return result
 
     def on__heartbeat(self, env, multipart_message, uuid):
         '''
@@ -112,10 +132,17 @@ class Broker(ZmqJsonRpcTask):
     def call_handler(self, handler, env, multipart_message, request):
         # Add `multipart_message` argument to handler call.
         sender_uuid = request['sender_uuid']
+        if sender_uuid in self._data['workers']['pending_create']:
+            self._data['workers']['running'][sender_uuid] = None
+            self._data['workers']['pending_create'].remove(sender_uuid)
+            logging.getLogger(log_label(self)).info('move %s from pending_create to running', sender_uuid)
         if sender_uuid in self._data['worker_states']:
             self._data['worker_states'][sender_uuid].reset_heartbeat()
         return handler(env, multipart_message, request['sender_uuid'],
                     *request['args'], **request['kwargs'])
+
+    def create_worker(self, env, worker_uuid, *args, **kwargs):
+        raise NotImplementedError
 
     def get_handler(self, command):
         '''
@@ -208,7 +235,8 @@ class Broker(ZmqJsonRpcTask):
     def timer__monitor_heartbeats(self, *args, **kwargs):
         for uuid, worker in self._data['worker_states'].iteritems():
             heartbeat_count = worker._heartbeat_count
-            if heartbeat_count is not None:
+            if uuid in self._data['workers']['running']\
+                    and heartbeat_count is not None:
                 # If `heartbeat_count` is `None`, the heart-beat has not been
                 # started.  We only process the heart-beat after it has been
                 # started.
@@ -217,9 +245,10 @@ class Broker(ZmqJsonRpcTask):
                     # This process has missed the maximum number of expected
                     # heartbeats, so add to list of flatlined workers.
                     self._data['workers']['flatlined'][uuid] = worker
+                    del self._data['workers']['running'][uuid]
                     if heartbeat_count == 0:
                         logging.getLogger(log_label(self)).info(
-                            'worker has flatlined (i.e., heartbeat_count=%d):'
+                            'worker has flatlined (i.e., heartbeat_count=%s):'
                             ' %s' % (heartbeat_count, uuid)
                         )
                 worker._heartbeat_count = heartbeat_count
@@ -232,7 +261,7 @@ class Broker(ZmqJsonRpcTask):
                 self._data['workers']['running'][uuid] = worker
                 del self._data['workers']['flatlined'][uuid]
                 logging.getLogger(log_label(self)).info(
-                    'worker %s has revived - heartbeat_count=%d'
+                    'worker %s has revived - heartbeat_count=%s'
                     % (uuid, heartbeat_count)
                 )
                 z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=uuid)
@@ -251,7 +280,80 @@ class Broker(ZmqJsonRpcTask):
         # the message back to when we receive a response on the `DEALER`
         # socket.
         message = multipart_message[2:]
-        return super(Broker, self).unpack_request(message)
+        return super(BrokerBase, self).unpack_request(message)
+
+
+class Broker(BrokerBase):
+    def create_worker(self, env, worker_uuid, *args, **kwargs):
+        '''
+        Create worker subprocess.
+        '''
+        import os
+        from subprocess import Popen, PIPE
+        import platform
+
+        if not hasattr(self, '_worker_subprocesses'):
+            self._worker_subprocesses = OrderedDict()
+        if worker_uuid in self._worker_subprocesses:
+            p = self._worker_subprocesses[worker_uuid]
+            if p.poll() is not None:
+                # Worker with same name existed, but has finished.
+                try:
+                    p.terminate()
+                except OSError:
+                    pass
+                finally:
+                    del self._worker_subprocesses[worker_uuid]
+            else:
+                # Worker already exists, so return `None`
+                logging.getLogger(log_label(self)).info(('worker already exists:', worker_uuid))
+                return None
+        logging.getLogger(log_label(self)).info((worker_uuid, args, kwargs))
+
+        env = os.environ
+        env.update(kwargs.pop('env', {}))
+        broker_connect_uri = self.uris['rpc'].replace(r'tcp://*', r'tcp://%s' %
+                                                      (platform.node()))
+        command = ('bash -c "'
+            '. /usr/local/bin/virtualenvwrapper.sh &&'
+            'workon zmq_job_manager && '
+            'cdvirtualenv && '
+            'mkdir -p worker_envs/%(uuid)s && '
+            'cd worker_envs/%(uuid)s && '
+            'python -m zmq_job_manager.worker %(uri)s %(uuid)s"'
+            % {'uuid': worker_uuid, 'uri': broker_connect_uri}
+        )
+        self._worker_subprocesses[worker_uuid] = Popen(command, shell=True,
+                                                       env=env, stdout=PIPE,
+                                                       stderr=PIPE)
+        logging.getLogger(log_label(self)).info('started worker subprocess for:'
+                                                ' %s\n%s', worker_uuid, command)
+        return worker_uuid
+
+    def terminate_worker(self, env, worker_uuid):
+        super(Broker, self).terminate_worker(env, worker_uuid)
+        if hasattr(self, '_worker_subprocesses'):
+            if worker_uuid in self._worker_subprocesses:
+                logging.getLogger(log_label(self)).info('terminate_worker: %s',
+                                                        worker_uuid)
+                p = self._worker_subprocesses[worker_uuid]
+                try:
+                    p.terminate()
+                except OSError:
+                    pass
+                finally:
+                    del self._worker_subprocesses[worker_uuid]
+            for workers_set in ('pending_terminate', 'flatlined'):
+                if worker_uuid in self._data['workers'][workers_set]:
+                    del self._data['workers'][workers_set][worker_uuid]
+                self._data['workers']['terminated'].add(worker_uuid)
+
+    def __del__(self):
+        super(Broker, self).__del__()
+        if hasattr(self, '_worker_subprocesses'):
+            for uuid, p in self._worker_subprocesses:
+                p.terminate()
+                p.close()
 
 
 def parse_args():

@@ -8,6 +8,7 @@ except ImportError:
 
 import transaction
 import zmq
+from zmq.utils import jsonapi
 from zmq_helpers.socket_configs import DeferredSocket
 from zmq_helpers.rpc import ZmqJsonRpcTask
 from zmq_helpers.utils import log_label
@@ -148,8 +149,20 @@ class WorkersSink(ZmqJsonRpcTask):
     def sub__stderr(self, message, data):
         self._on__std_base(message, data, 'stderr')
 
-    def sub__begin_task(self, message, data):
-        logging.getLogger(log_label(self)).info(data)
+    def sub__begin_task(self, message, seconds_since_epoch_str, worker_info,
+                        serialization):
+        if serialization == 'SERIALIZE__PICKLE':
+            worker_info = pickle.loads(worker_info)
+        elif serialization == 'SERIALIZE__JSON':
+            worker_info = jsonapi.loads(worker_info)
+        elif serialization != 'SERIALIZE__NONE':
+            worker_info = {'data': worker_info, 'serialization': serialization}
+        begin_time = datetime.utcfromtimestamp(float(seconds_since_epoch_str))
+        self.save(message.worker_uuid, message.task_uuid, '__begin_task__',
+                  begin_time)
+        self.save(message.worker_uuid, message.task_uuid, '__worker_info__',
+                  worker_info)
+        logging.getLogger(log_label(self)).info(worker_info)
 
     def sub__complete_task(self, message, data):
         self.save(message.worker_uuid, message.task_uuid, '__complete_task__',

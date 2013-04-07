@@ -70,6 +70,9 @@ class BrokerBase(ZmqJsonRpcTask):
             # worker's heartbeat count.  The `worker_states` mapping is indexed
             # by worker uuid.
             'worker_states': OrderedDict(),
+            # The information regarding the worker provided by the worker during
+            # registration.
+            'worker_infos': OrderedDict(),
         }
         return data
 
@@ -97,7 +100,6 @@ class BrokerBase(ZmqJsonRpcTask):
 
     def on__begin_task(self, env, multipart_message, uuid, task_uuid,
                        **kwargs):
-        self._data['worker_states'] = OrderedDict()
         self._data['worker_states'][uuid] = WorkerState(uuid, task_uuid, 5)
         z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=uuid)
         result = z.begin_task(task_uuid, **kwargs)
@@ -129,17 +131,13 @@ class BrokerBase(ZmqJsonRpcTask):
         '''
         return True
 
-    def call_handler(self, handler, env, multipart_message, request):
-        # Add `multipart_message` argument to handler call.
-        sender_uuid = request['sender_uuid']
-        if sender_uuid in self._data['workers']['pending_create']:
-            self._data['workers']['running'][sender_uuid] = None
-            self._data['workers']['pending_create'].remove(sender_uuid)
-            logging.getLogger(log_label(self)).info('move %s from pending_create to running', sender_uuid)
-        if sender_uuid in self._data['worker_states']:
-            self._data['worker_states'][sender_uuid].reset_heartbeat()
-        return handler(env, multipart_message, request['sender_uuid'],
-                    *request['args'], **request['kwargs'])
+    def on__register_worker(self, env, multipart_message, uuid, worker_info):
+        self._data['worker_infos'][uuid] = worker_info
+
+    def on__request_task(self, env, multipart_message, worker_uuid):
+        z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=worker_uuid)
+        result = z.request_task(self._data['worker_infos'][worker_uuid])
+        return result
 
     def create_worker(self, env, worker_uuid, *args, **kwargs):
         raise NotImplementedError
@@ -158,6 +156,17 @@ class BrokerBase(ZmqJsonRpcTask):
                 return _do_command
             self.refresh_handler_methods()
         return self._handler_methods.get(command)
+
+    def call_handler(self, handler, env, multipart_message, request):
+        '''
+        Isolate handler call in this method to allow subclasses to perform
+        special-handling, if necessary.
+
+        Note that the multipart-message is ignored by default.
+        '''
+        print log_label(self), request['command']
+        return handler(env, multipart_message, request['sender_uuid'],
+                       *request['args'], **request['kwargs'])
 
     def get_sock_configs(self):
         return OrderedDict([
@@ -331,6 +340,10 @@ class Broker(BrokerBase):
         return worker_uuid
 
     def terminate_worker(self, env, worker_uuid):
+        '''
+        If a worker subprocess has been launched by the broker for the
+        specified worker uuid, terminate the subprocess.
+        '''
         super(Broker, self).terminate_worker(env, worker_uuid)
         if hasattr(self, '_worker_subprocesses'):
             if worker_uuid in self._worker_subprocesses:
@@ -349,11 +362,21 @@ class Broker(BrokerBase):
                 self._data['workers']['terminated'].add(worker_uuid)
 
     def __del__(self):
+        self.close()
+
+    def close(self):
+        '''
+        Terminate any subprocesses that are still running.
+        '''
         super(Broker, self).__del__()
         if hasattr(self, '_worker_subprocesses'):
             for uuid, p in self._worker_subprocesses:
-                p.terminate()
-                p.close()
+                try:
+                    p.terminate()
+                    p.close()
+                except:
+                    pass
+
 
 
 def parse_args():

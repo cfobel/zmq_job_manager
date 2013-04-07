@@ -9,12 +9,13 @@ except ImportError:
     import pickle
 
 import zmq
+from zmq.utils import jsonapi
 from zmq_helpers.socket_configs import DeferredSocket
 from zmq_helpers.rpc import ZmqJsonRpcTask
 from zmq_helpers.utils import log_label, get_public_ip
 
 from .process import DeferredPopen
-from .constants import SERIALIZE__NONE
+from .constants import SERIALIZE__NONE, SERIALIZE__JSON
 
 
 def get_seconds_since_epoch():
@@ -43,7 +44,10 @@ class Master(ZmqJsonRpcTask):
     def get_uris(self):
         return self._uris
 
-    def on__get_uris(self, *args, **kwargs):
+    def get_task(self, env, worker_uuid, worker_info):
+        return self.pending_tasks.popitem(0)
+
+    def on__get_uris(self, env, uuid, *args, **kwargs):
         return OrderedDict([(k, u.replace(r'tcp://*', r'tcp://%s' %
                                           self.hostname))
                             for k, u in self.get_uris().items()])
@@ -115,9 +119,12 @@ class Master(ZmqJsonRpcTask):
         else:
             raise KeyError, 'No task found for uuid: %s' % task_uuid
 
-    def on__request_task(self, env, uuid):
+    def on__request_task(self, env, uuid, worker_info):
+        if not hasattr(self, '_worker_infos'):
+            self._worker_infos = OrderedDict()
+        self._worker_infos[uuid] = worker_info
         if self.pending_tasks:
-            result = self.pending_tasks.popitem(0)
+            result = self.get_task(env, uuid, worker_info)
             self.running_tasks[result[0]] = result[1]
             self.assign_task(uuid, *result)
         else:
@@ -128,8 +135,10 @@ class Master(ZmqJsonRpcTask):
         if task_uuid in self.running_tasks:
             if seconds_since_epoch is None:
                 seconds_since_epoch = get_seconds_since_epoch()
-            self.publish(env, uuid, task_uuid, 'begin_task',
-                         '%.6f' % seconds_since_epoch)
+            self.publish(env, uuid, task_uuid, 'begin_task', '%.6f' %
+                         seconds_since_epoch,
+                         jsonapi.dumps(self._worker_infos.get(uuid)),
+                         SERIALIZE__JSON)
 
     def on__terminate_worker(self, env, uuid, seconds_since_epoch=None):
         self._publish_with_time_float(env, uuid, '', 'terminated_worker',
@@ -138,6 +147,10 @@ class Master(ZmqJsonRpcTask):
     def on__flatlined_worker(self, env, uuid, seconds_since_epoch=None):
         self._publish_with_time_float(env, uuid, '', 'flatlined_worker',
                                       seconds_since_epoch)
+
+    def on__get_worker_info(self, env, uuid, worker_uuid):
+        if hasattr(self, '_worker_infos'):
+            return self._worker_infos.get(worker_uuid)
 
     def on__revived_worker(self, env, uuid, seconds_since_epoch=None):
         self._publish_with_time_float(env, uuid, '', 'revived_worker',

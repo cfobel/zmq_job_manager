@@ -5,13 +5,15 @@ import logging
 from collections import OrderedDict
 from uuid import uuid4
 import time
+import platform
 try:
     import cPickle as pickle
 except ImportError:
     import pickle
 
+import psutil
+import netifaces
 from zmq.eventloop.ioloop import IOLoop, PeriodicCallback
-
 from zmq_helpers.rpc import ZmqJsonRpcProxy
 from zmq_helpers.utils import log_label
 from cpu_info.cpu_info import cpu_info, cpu_summary
@@ -32,6 +34,25 @@ class ProxyPopen(PopenPipeReactor):
         self.proxy.stderr(value)
 
 
+def worker_info():
+    interfaces = [i for i in netifaces.interfaces()
+                  if netifaces.ifaddresses(i).get(netifaces.AF_INET,
+                                                  [{}])[0].get('addr')]
+
+    d = OrderedDict([
+        ('cpu_summary', cpu_summary()),
+        ('cpu_info', cpu_info()),
+        ('hostname', platform.node()),
+        ('physical_memory', psutil.phymem_usage()._asdict()),
+        ('virtual_memory', psutil.virtual_memory()._asdict()),
+        ('swap_memory', psutil.swap_memory()._asdict()),
+        ('interfaces', OrderedDict([
+            (i, netifaces.ifaddresses(i)[netifaces.AF_INET][0])
+                                    for i in interfaces])),
+    ])
+    return d
+
+
 class Worker(object):
     def __init__(self, master_uri, uuid=None, time_limit='5m',
                  memory_limit='1G', n_procs=1, n_threads=1):
@@ -45,9 +66,10 @@ class Worker(object):
 
     def run(self):
         master = ZmqJsonRpcProxy(self.uris['master'], uuid=self.uuid)
-        master.store('__cpu_summary__', cpu_summary())
-        master.store('__cpu_info__', pickle.dumps(cpu_info()),
-                        serialization=SERIALIZE__PICKLE)
+        # Notify broker that we're alive and send our configuration
+        # information.  This `worker_info` currently contains information
+        # regarding the CPU and the network interfaces.
+        master.register_worker(worker_info())
         logging.getLogger(log_label(self)).info(
             'available handlers: %s' % (master.available_handlers(), ))
         logging.getLogger(log_label(self)).info(

@@ -6,6 +6,7 @@ from collections import OrderedDict
 from uuid import uuid4
 import time
 import platform
+import os
 try:
     import cPickle as pickle
 except ImportError:
@@ -98,7 +99,12 @@ class Worker(object):
             # Run an IO-loop here, to allow useful work while the subprocess is
             # run in the background thread, `t`.
             task_uuid, d = d
-            p = d.make(popen_class=ProxyPopen)
+            env = os.environ.copy()
+            env.update({'ZMQ_JOB_MANAGER__BROKER_URI': self.uris['master'],
+                        'ZMQ_JOB_MANAGER__WORKER_UUID': self.uuid,
+                        'ZMQ_JOB_MANAGER__TASK_UUID': task_uuid})
+
+            p = d.make(popen_class=ProxyPopen, env=env)
             t = Thread(target=p.communicate, args=(master, ))
             t.daemon = True
             t.start()
@@ -140,6 +146,10 @@ class Worker(object):
                 for c in callbacks.values():
                     c.start()
                     time.sleep(0.1)
+                master.store('__task__', pickle.dumps(d),
+                             serialization=SERIALIZE__PICKLE)
+                master.store('__env__', pickle.dumps(env),
+                             serialization=SERIALIZE__PICKLE)
                 master.begin_task(task_uuid)
 
             io_loop.add_callback(_on_run)

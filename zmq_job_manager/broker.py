@@ -17,7 +17,7 @@ class WorkerState(object):
         self._request_queue = []
         self._task_uuid = task_uuid
         self._starting_heartbeat_count = heartbeat_count
-        self._heartbeat_count = None
+        self._heartbeat_count = heartbeat_count
 
     def reset_heartbeat(self, value=None):
         old_value = getattr(self, '_starting_heartbeat_count', None)
@@ -53,17 +53,15 @@ class BrokerBase(ZmqJsonRpcTask):
                 # Worker creation requested (but not completed/verified)
                 'pending_create': set(),
                 # Worker termination requested (but not completed/verified)
-                'pending_terminate': OrderedDict(),
+                'pending_terminate': set(),
                 # Worker running (i.e., we've received a request from the
                 # worker)
-                'running': OrderedDict(),
-                # Worker has finished running and has sent a `complete_task`
-                # reqeust.
-                'completed': OrderedDict(),
+                'running': set(),
                 'terminated': set(),
                 # We haven't received any request (including heart-beat) from
                 # the worker in 5 heart-beat interval counts.
-                'flatlined': OrderedDict(),
+                'flatlined': set(),
+                'flatlined_latch': set(),
             },
             # The state of each worker, with respect to the worker's uuid, the
             # assigned task's uuid, the worker's request queue, and the
@@ -73,6 +71,7 @@ class BrokerBase(ZmqJsonRpcTask):
             # The information regarding the worker provided by the worker during
             # registration.
             'worker_infos': OrderedDict(),
+            'worker_attrs': OrderedDict(),
         }
         return data
 
@@ -100,7 +99,7 @@ class BrokerBase(ZmqJsonRpcTask):
 
     def on__begin_task(self, env, multipart_message, uuid, task_uuid,
                        **kwargs):
-        self._data['worker_states'][uuid] = WorkerState(uuid, task_uuid, 5)
+        self._data['worker_states'][uuid]._task_uuid = task_uuid
         z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=uuid)
         result = z.begin_task(task_uuid, **kwargs)
         return result
@@ -131,8 +130,21 @@ class BrokerBase(ZmqJsonRpcTask):
         '''
         return True
 
-    def on__register_worker(self, env, multipart_message, uuid, worker_info):
+    def on__register_worker(self, env, multipart_message, uuid, worker_info,
+                            affinity_labels=tuple(), end_time=None,
+                            memory_limit=None):
+        if uuid in self._data['workers']['pending_create']:
+            self._data['workers']['pending_create'].remove(uuid)
+        # Default the heart-beat timeout to 5 cycles
+        #self._data['worker_states'][uuid] = WorkerState(uuid, task_uuid, 5)
+        self._data['worker_states'][uuid] = WorkerState(uuid, None, 5)
+        self._data['workers']['running'].add(uuid)
         self._data['worker_infos'][uuid] = worker_info
+        self._data['worker_attrs'][uuid] = OrderedDict([
+            ('affinity_labels', affinity_labels),
+            ('end_time', end_time),
+            ('memory_limit', memory_limit),
+        ])
 
     def on__request_task(self, env, multipart_message, worker_uuid):
         z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=worker_uuid)
@@ -164,6 +176,8 @@ class BrokerBase(ZmqJsonRpcTask):
 
         Note that the multipart-message is ignored by default.
         '''
+        if request['sender_uuid'] in self._data['worker_states']:
+            self._data['worker_states'][request['sender_uuid']].reset_heartbeat()
         print log_label(self), request['command']
         return handler(env, multipart_message, request['sender_uuid'],
                        *request['args'], **request['kwargs'])
@@ -229,46 +243,63 @@ class BrokerBase(ZmqJsonRpcTask):
         `pending_terminate` set, but the sub-classes may implement
         `terminate_worker(self, env, uuid)` accordingly.
         '''
-        z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=worker_uuid)
+        def get_z():
+            return ZmqJsonRpcProxy(self._uris['dealer'], uuid=worker_uuid)
+
+        z = None
+
         if worker_uuid in self._data['workers']['pending_terminate']:
-            del self._data['workers']['pending_terminate'][worker_uuid]
+            if z is None: z = get_z()
+            self._data['workers']['pending_terminate'].remove(worker_uuid)
+            self._data['workers']['terminated'].add(worker_uuid)
             z.terminated_worker()
-        if worker_uuid in self._data['workers']['flatlined']:
+        if worker_uuid in self._data['workers']['flatlined']\
+                and worker_uuid in self._data['workers']['flatlined_latch']:
+            if z is None: z = get_z()
             z.flatlined_worker()
+            self._data['workers']['flatlined_latch'].remove(worker_uuid)
+
+        if worker_uuid in self._data['worker_states']:
+            self._data['worker_states'][worker_uuid]._task_uuid = None
 
     def timer__grim_reaper(self, env, *args, **kwargs):
         for workers_set in ('pending_terminate', 'flatlined'):
-            for uuid, worker in self._data['workers'][workers_set].iteritems():
+            for uuid in self._data['workers'][workers_set].copy():
                 self.terminate_worker(env, uuid)
 
     def timer__monitor_heartbeats(self, *args, **kwargs):
-        for uuid, worker in self._data['worker_states'].iteritems():
-            heartbeat_count = worker._heartbeat_count
-            if uuid in self._data['workers']['running']\
-                    and heartbeat_count is not None:
-                # If `heartbeat_count` is `None`, the heart-beat has not been
-                # started.  We only process the heart-beat after it has been
-                # started.
-                heartbeat_count -= 1
-                if heartbeat_count <= 0:
-                    # This process has missed the maximum number of expected
-                    # heartbeats, so add to list of flatlined workers.
-                    self._data['workers']['flatlined'][uuid] = worker
-                    del self._data['workers']['running'][uuid]
-                    if heartbeat_count == 0:
-                        logging.getLogger(log_label(self)).info(
-                            'worker has flatlined (i.e., heartbeat_count=%s):'
-                            ' %s' % (heartbeat_count, uuid)
-                        )
-                worker._heartbeat_count = heartbeat_count
+        for uuid in self._data['workers']['running'].copy():
+            worker = self._data['worker_states'].get(uuid)
+            if worker:
+                heartbeat_count = worker._heartbeat_count
+                if uuid in self._data['workers']['running']\
+                        and heartbeat_count is not None:
+                    # If `heartbeat_count` is `None`, the heart-beat has not
+                    # been started.  We only process the heart-beat after it
+                    # has been started.
+                    heartbeat_count -= 1
+                    if heartbeat_count <= 0:
+                        # This process has missed the maximum number of
+                        # expected heartbeats, so add to list of flatlined
+                        # workers.
+                        self._data['workers']['flatlined'].add(uuid)
+                        # Set a flag to mark worker as newly flat-lined.
+                        self._data['workers']['flatlined_latch'].add(uuid)
+                        self._data['workers']['running'].remove(uuid)
+                        if heartbeat_count == 0:
+                            logging.getLogger(log_label(self)).info('worker '
+                                    'has flatlined (i.e., heartbeat_count=%s):'
+                                    ' %s' % (heartbeat_count, uuid))
+                    worker._heartbeat_count = heartbeat_count
 
-        for uuid, worker in self._data['workers']['flatlined'].iteritems():
+        for uuid in self._data['workers']['flatlined'].copy():
+            worker = self._data['worker_states'][uuid]
             if worker._heartbeat_count is not None\
                     and worker._heartbeat_count > 0:
                 # A worker has come back to life!  Update the worker mappings
                 # accordingly.
-                self._data['workers']['running'][uuid] = worker
-                del self._data['workers']['flatlined'][uuid]
+                self._data['workers']['running'].add(uuid)
+                self._data['workers']['flatlined'].remove(uuid)
                 logging.getLogger(log_label(self)).info(
                     'worker %s has revived - heartbeat_count=%s'
                     % (uuid, heartbeat_count)
@@ -358,7 +389,7 @@ class Broker(BrokerBase):
                     del self._worker_subprocesses[worker_uuid]
             for workers_set in ('pending_terminate', 'flatlined'):
                 if worker_uuid in self._data['workers'][workers_set]:
-                    del self._data['workers'][workers_set][worker_uuid]
+                    self._data['workers'][workers_set].remove(worker_uuid)
                 self._data['workers']['terminated'].add(worker_uuid)
 
     def __del__(self):
@@ -394,6 +425,7 @@ def parse_args():
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
+    #logging.basicConfig(level=logging.CRITICAL)
     args = parse_args()
     b = Broker(args.dealer_uri, args.router_uri)
     b.run()

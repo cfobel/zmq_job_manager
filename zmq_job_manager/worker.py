@@ -1,5 +1,5 @@
 from multiprocessing import Pipe
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Thread
 import logging
 from collections import OrderedDict
@@ -21,6 +21,7 @@ from cpu_info.cpu_info import cpu_info, cpu_summary
 
 from .process import PopenPipeReactor
 from .constants import SERIALIZE__PICKLE
+from .worker_limits import extract_memory_limit, extract_runtime_limit
 
 
 class ProxyPopen(PopenPipeReactor):
@@ -39,6 +40,8 @@ def worker_info():
     interfaces = [i for i in netifaces.interfaces()
                   if netifaces.ifaddresses(i).get(netifaces.AF_INET,
                                                   [{}])[0].get('addr')]
+    p = psutil.Process(os.getpid())
+    worker_memory = p.get_memory_info()._asdict()
 
     d = OrderedDict([
         ('cpu_summary', cpu_summary()),
@@ -46,6 +49,7 @@ def worker_info():
         ('hostname', platform.node()),
         ('physical_memory', psutil.phymem_usage()._asdict()),
         ('virtual_memory', psutil.virtual_memory()._asdict()),
+        ('worker_memory', worker_memory),
         ('swap_memory', psutil.swap_memory()._asdict()),
         ('interfaces', OrderedDict([
             (i, netifaces.ifaddresses(i)[netifaces.AF_INET][0])
@@ -55,11 +59,21 @@ def worker_info():
 
 
 class Worker(object):
-    def __init__(self, master_uri, uuid=None, time_limit='5m',
-                 memory_limit='1G', n_procs=1, n_threads=1):
+    def __init__(self, master_uri, uuid=None, labels=tuple(), time_limit=None,
+                 memory_limit=None, n_procs=1, n_threads=1):
         self.uris = OrderedDict(master=master_uri)
-        self.config = dict(time_limit=time_limit, memory_limit=memory_limit,
-                           n_procs=n_procs, n_threads=n_threads)
+        if time_limit is not None:
+            time_limit = extract_runtime_limit(time_limit)
+        if memory_limit is not None:
+            memory_limit = extract_memory_limit(memory_limit)
+        self.config = dict(labels=labels, time_limit=time_limit,
+                           memory_limit=memory_limit, n_procs=n_procs,
+                           n_threads=n_threads)
+
+        self.start_time = None
+        self.end_time = None
+        self.requested_end_time = None
+
         if uuid is None:
             self.uuid = str(uuid4())
         else:
@@ -67,6 +81,10 @@ class Worker(object):
 
     def run(self):
         master = ZmqJsonRpcProxy(self.uris['master'], uuid=self.uuid)
+        self.start_time = datetime.now()
+        if self.config['time_limit']:
+            delta = max(timedelta(), self.config['time_limit'] - timedelta(minutes=5))
+            self.end_time = self.start_time + delta
         # Notify broker that we're alive and send our configuration
         # information.  This `worker_info` currently contains information
         # regarding the CPU and the network interfaces.
@@ -75,20 +93,17 @@ class Worker(object):
             'available handlers: %s' % (master.available_handlers(), ))
         logging.getLogger(log_label(self)).info(
             'uris: %s' % (master.get_uris(), ))
-        logging.getLogger(log_label(self)).info(
-            'broker hello world: %s' % (master.broker_hello_world(), ))
+        #logging.getLogger(log_label(self)).info(
+            #'broker hello world: %s' % (master.broker_hello_world(), ))
         shell_command = 'echo "[start] $(date)"; sleep 1; '\
                 'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
+        #shell_command = 'python -m zmq_job_manager.test_task'
+        #'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
         logging.getLogger(log_label(self)).info(
             'register task: %s' % (master.register_task(shell_command), ))
         while master.pending_task_ids():
+        #if master.pending_task_ids():
             self.run_task(master)
-        logging.getLogger(log_label(self)).info(
-            'pending tasks: %s' % (master.pending_task_ids(), ))
-        logging.getLogger(log_label(self)).info(
-            'running tasks: %s' % (master.running_task_ids(), ))
-        logging.getLogger(log_label(self)).info(
-            'completed tasks: %s' % (master.completed_task_ids(), ))
 
     def run_task(self, master):
         # Request a task from the master and run it in a subprocess, forwarding

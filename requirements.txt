@@ -1,0 +1,9 @@
+psutil==0.6.1
+pyzmq==13.0.2
+wsgiref==0.1.2
+netifaces==0.8
+
+-e git://github.com/cfobel/python-cpu_info.git@master#egg=cpu_info
+-e git://github.com/cfobel/path.py.git@master#egg=path
+-e git://github.com/cfobel/zmq_helpers@master#egg=zmq_helpers
+-e git://github.com/cfobel/zmq_job_manager@master#egg=zmq_job_manager

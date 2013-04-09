@@ -59,9 +59,9 @@ def worker_info():
 
 
 class Worker(object):
-    def __init__(self, master_uri, uuid=None, labels=tuple(), time_limit=None,
+    def __init__(self, manager_uri, uuid=None, labels=tuple(), time_limit=None,
                  memory_limit=None, n_procs=1, n_threads=1):
-        self.uris = OrderedDict(master=master_uri)
+        self.uris = OrderedDict(manager=manager_uri)
         if time_limit is not None:
             time_limit = extract_runtime_limit(time_limit)
         if memory_limit is not None:
@@ -80,7 +80,7 @@ class Worker(object):
             self.uuid = uuid
 
     def run(self):
-        master = ZmqJsonRpcProxy(self.uris['master'], uuid=self.uuid)
+        manager = ZmqJsonRpcProxy(self.uris['manager'], uuid=self.uuid)
         self.start_time = datetime.now()
         if self.config['time_limit']:
             delta = max(timedelta(), self.config['time_limit'] - timedelta(minutes=5))
@@ -88,39 +88,39 @@ class Worker(object):
         # Notify broker that we're alive and send our configuration
         # information.  This `worker_info` currently contains information
         # regarding the CPU and the network interfaces.
-        master.register_worker(worker_info())
+        manager.register_worker(worker_info())
         logging.getLogger(log_label(self)).info(
-            'available handlers: %s' % (master.available_handlers(), ))
+            'available handlers: %s' % (manager.available_handlers(), ))
         logging.getLogger(log_label(self)).info(
-            'uris: %s' % (master.get_uris(), ))
+            'uris: %s' % (manager.get_uris(), ))
         #logging.getLogger(log_label(self)).info(
-            #'broker hello world: %s' % (master.broker_hello_world(), ))
-        shell_command = 'echo "[start] $(date)"; sleep 1; '\
-                'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
-        #shell_command = 'python -m zmq_job_manager.test_task'
+            #'broker hello world: %s' % (manager.broker_hello_world(), ))
+        #shell_command = 'echo "[start] $(date)"; sleep 1; '\
+                #'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
+        shell_command = 'python -m zmq_job_manager.test_task'
         #'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
         logging.getLogger(log_label(self)).info(
-            'register task: %s' % (master.register_task(shell_command), ))
-        while master.pending_task_ids():
-        #if master.pending_task_ids():
-            self.run_task(master)
+            'register task: %s' % (manager.register_task(shell_command), ))
+        while manager.pending_task_ids():
+        #if manager.pending_task_ids():
+            self.run_task(manager)
 
-    def run_task(self, master):
-        # Request a task from the master and run it in a subprocess, forwarding
-        # any `stdout` or `stderr` output to master.
-        d = pickle.loads(str(master.request_task()))
+    def run_task(self, manager):
+        # Request a task from the manager and run it in a subprocess, forwarding
+        # any `stdout` or `stderr` output to manager.
+        d = pickle.loads(str(manager.request_task()))
         logging.getLogger(log_label(self)).info('request_task: %s' % (d, ))
         if d:
             # Run an IO-loop here, to allow useful work while the subprocess is
             # run in the background thread, `t`.
             task_uuid, d = d
             env = os.environ.copy()
-            env.update({'ZMQ_JOB_MANAGER__BROKER_URI': self.uris['master'],
+            env.update({'ZMQ_JOB_MANAGER__BROKER_URI': self.uris['manager'],
                         'ZMQ_JOB_MANAGER__WORKER_UUID': self.uuid,
                         'ZMQ_JOB_MANAGER__TASK_UUID': task_uuid})
 
             p = d.make(popen_class=ProxyPopen, env=env)
-            t = Thread(target=p.communicate, args=(master, ))
+            t = Thread(target=p.communicate, args=(manager, ))
             t.daemon = True
             t.start()
             io_loop = IOLoop()
@@ -148,7 +148,7 @@ class Worker(object):
                 Send a heartbeat request to the broker to notify that we are
                 still alive.
                 '''
-                master.heartbeat()
+                manager.heartbeat()
 
             callbacks = OrderedDict()
             callbacks['heartbeat'] = PeriodicCallback(timer__heartbeat, 4000,
@@ -161,11 +161,11 @@ class Worker(object):
                 for c in callbacks.values():
                     c.start()
                     time.sleep(0.1)
-                master.store('__task__', pickle.dumps(d),
+                manager.store('__task__', pickle.dumps(d),
                              serialization=SERIALIZE__PICKLE)
-                master.store('__env__', pickle.dumps(env),
+                manager.store('__env__', pickle.dumps(env),
                              serialization=SERIALIZE__PICKLE)
-                master.begin_task(task_uuid)
+                manager.begin_task(task_uuid)
 
             io_loop.add_callback(_on_run)
 
@@ -174,9 +174,9 @@ class Worker(object):
             except KeyboardInterrupt:
                 pass
 
-            master.store('done', pickle.dumps(datetime.now()),
+            manager.store('done', pickle.dumps(datetime.now()),
                          serialization=SERIALIZE__PICKLE)
-            master.complete_task(task_uuid)
+            manager.complete_task(task_uuid)
 
 
 def parse_args():
@@ -184,7 +184,7 @@ def parse_args():
     from argparse import ArgumentParser
 
     parser = ArgumentParser(description='''Worker demo''')
-    parser.add_argument(nargs=1, dest='master_uri', type=str)
+    parser.add_argument(nargs=1, dest='manager_uri', type=str)
     parser.add_argument(nargs='?', dest='worker_uuid', type=str,
                         default=str(uuid4()))
     parser.add_argument(nargs='?', dest='time_limit', default='5m')
@@ -192,14 +192,14 @@ def parse_args():
     parser.add_argument(nargs='?', dest='n_procs', type=int, default=1)
     parser.add_argument(nargs='?', dest='n_threads', type=int, default=1)
     args = parser.parse_args()
-    args.master_uri = args.master_uri[0]
+    args.manager_uri = args.manager_uri[0]
     return args
 
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     args = parse_args()
-    w = Worker(args.master_uri, uuid=args.worker_uuid,
+    w = Worker(args.manager_uri, uuid=args.worker_uuid,
                time_limit=args.time_limit,
                memory_limit=args.memory_limit, n_procs=args.n_procs,
                n_threads=args.n_threads)

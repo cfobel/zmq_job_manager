@@ -14,6 +14,7 @@ except ImportError:
 
 import psutil
 import netifaces
+import eventlet
 from zmq.eventloop.ioloop import IOLoop, PeriodicCallback
 from zmq_helpers.rpc import ZmqJsonRpcProxy
 from zmq_helpers.utils import log_label
@@ -101,25 +102,27 @@ class Worker(object):
         #'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
         logging.getLogger(log_label(self)).info(
             'register task: %s' % (manager.register_task(shell_command), ))
-        while manager.pending_task_ids():
-        #if manager.pending_task_ids():
-            self.run_task(manager)
+        #while True:
+        if manager.pending_task_ids():
+            d = manager.request_task.spawn()
+            while not d.ready():
+                eventlet.sleep(0.01)
+            task_uuid, task = pickle.loads(str(d.wait()))
+            self.run_task(manager, task_uuid, task)
 
-    def run_task(self, manager):
-        # Request a task from the manager and run it in a subprocess, forwarding
-        # any `stdout` or `stderr` output to manager.
-        d = pickle.loads(str(manager.request_task()))
-        logging.getLogger(log_label(self)).info('request_task: %s' % (d, ))
-        if d:
+    def run_task(self, manager, task_uuid, task):
+        # Run a task in a subprocess, forwarding any `stdout` or `stderr`
+        # output to manager.
+        logging.getLogger(log_label(self)).info('request_task: %s' % (task, ))
+        if task:
             # Run an IO-loop here, to allow useful work while the subprocess is
             # run in the background thread, `t`.
-            task_uuid, d = d
             env = os.environ.copy()
             env.update({'ZMQ_JOB_MANAGER__BROKER_URI': self.uris['manager'],
                         'ZMQ_JOB_MANAGER__WORKER_UUID': self.uuid,
                         'ZMQ_JOB_MANAGER__TASK_UUID': task_uuid})
 
-            p = d.make(popen_class=ProxyPopen, env=env)
+            p = task.make(popen_class=ProxyPopen, env=env)
             t = Thread(target=p.communicate, args=(manager, ))
             t.daemon = True
             t.start()
@@ -161,7 +164,7 @@ class Worker(object):
                 for c in callbacks.values():
                     c.start()
                     time.sleep(0.1)
-                manager.store('__task__', pickle.dumps(d),
+                manager.store('__task__', pickle.dumps(task),
                              serialization=SERIALIZE__PICKLE)
                 manager.store('__env__', pickle.dumps(env),
                              serialization=SERIALIZE__PICKLE)

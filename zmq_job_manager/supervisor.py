@@ -31,10 +31,10 @@ class WorkerState(object):
 
 
 class SupervisorBase(ZmqJsonRpcTask):
-    def __init__(self, master_rpc_uri, rpc_uri, master_rpc_bind=False, **kwargs):
+    def __init__(self, manager_rpc_uri, rpc_uri, manager_rpc_bind=False, **kwargs):
         self._uris = OrderedDict()
         self._uris['rpc'] = rpc_uri
-        self._uris['master_rpc'] = master_rpc_uri
+        self._uris['manager_rpc'] = manager_rpc_uri
         self._remote_handlers = set()
         self._data = None
         super(SupervisorBase, self).__init__(on_run=self.on_run, **kwargs)
@@ -76,7 +76,7 @@ class SupervisorBase(ZmqJsonRpcTask):
         return data
 
     def on_run(self, ctx, io_loop, socks, streams):
-        z = ZmqJsonRpcProxy(self._uris['master_rpc'])
+        z = ZmqJsonRpcProxy(self._uris['manager_rpc'])
         self._data = self._initial_data()
         self._remote_handlers = set(z.available_handlers())
         env = OrderedDict([
@@ -100,7 +100,7 @@ class SupervisorBase(ZmqJsonRpcTask):
     def on__begin_task(self, env, multipart_message, uuid, task_uuid,
                        **kwargs):
         self._data['worker_states'][uuid]._task_uuid = task_uuid
-        z = ZmqJsonRpcProxy(self._uris['master_rpc'], uuid=uuid)
+        z = ZmqJsonRpcProxy(self._uris['manager_rpc'], uuid=uuid)
         result = z.begin_task(task_uuid, **kwargs)
         return result
 
@@ -158,7 +158,7 @@ class SupervisorBase(ZmqJsonRpcTask):
         return requests
 
     def on__request_task(self, env, multipart_message, worker_uuid):
-        z = ZmqJsonRpcProxy(self._uris['master_rpc'], uuid=worker_uuid)
+        z = ZmqJsonRpcProxy(self._uris['manager_rpc'], uuid=worker_uuid)
         result = z.request_task(self._data['worker_infos'][worker_uuid])
         return result
 
@@ -174,7 +174,7 @@ class SupervisorBase(ZmqJsonRpcTask):
         if not command in self._handler_methods:
             if command in self._remote_handlers:
                 def _do_command(env, multipart_message, uuid, *args, **kwargs):
-                    z = ZmqJsonRpcProxy(self._uris['master_rpc'], uuid=uuid)
+                    z = ZmqJsonRpcProxy(self._uris['manager_rpc'], uuid=uuid)
                     return getattr(z, command)(*args, **kwargs)
                 return _do_command
             self.refresh_handler_methods()
@@ -204,7 +204,7 @@ class SupervisorBase(ZmqJsonRpcTask):
     def get_uris(self):
         return self._uris
 
-    def process_master_rpc_response(self, env, multipart_message):
+    def process_manager_rpc_response(self, env, multipart_message):
         # We received a response to the dealer socket, so we need to forward
         # the message back to the job that requested through the router socket.
         sender_uuid = self.deserialize_frame(multipart_message[2])
@@ -257,7 +257,7 @@ class SupervisorBase(ZmqJsonRpcTask):
         `terminate_worker(self, env, uuid)` accordingly.
         '''
         def get_z():
-            return ZmqJsonRpcProxy(self._uris['master_rpc'], uuid=worker_uuid)
+            return ZmqJsonRpcProxy(self._uris['manager_rpc'], uuid=worker_uuid)
 
         z = None
 
@@ -317,7 +317,7 @@ class SupervisorBase(ZmqJsonRpcTask):
                     'worker %s has revived - heartbeat_count=%s'
                     % (uuid, worker._heartbeat_count)
                 )
-                z = ZmqJsonRpcProxy(self._uris['master_rpc'], uuid=uuid)
+                z = ZmqJsonRpcProxy(self._uris['manager_rpc'], uuid=uuid)
                 z.revived_worker()
 
     def unpack_request(self, multipart_message):
@@ -443,12 +443,21 @@ This process supervises a set of worker processes.  Each worker process:
     subprocess to `stdout` or `stderr`.
  5. Notifies supervisor when task has been completed or terminated.
  6. Repeat steps 2-6 until a worker terminate request is received.
+
+The supervisor forwards most requests to the manager process on the workers
+behalf.  The supervisor is responsible for maintaining a queue of tasks to
+perform and for publishing worker-related status updates to a `PUB` port, which
+can be subscribed to by processes such as `workers_sink.py` (see workers sink
+usage for details).
+
+Note that the supervisor does not actually store any output from the
+workers/tasks.
     '''.strip())
     parser.add_argument(nargs=1, dest='rpc_uri', type=str)
-    parser.add_argument(nargs=1, dest='master_rpc_uri', type=str)
+    parser.add_argument(nargs=1, dest='manager_rpc_uri', type=str)
     args = parser.parse_args()
     args.rpc_uri = args.rpc_uri[0]
-    args.master_rpc_uri = args.master_rpc_uri[0]
+    args.manager_rpc_uri = args.manager_rpc_uri[0]
     return args
 
 
@@ -456,5 +465,5 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     #logging.basicConfig(level=logging.CRITICAL)
     args = parse_args()
-    b = Supervisor(args.master_rpc_uri, args.rpc_uri)
+    b = Supervisor(args.manager_rpc_uri, args.rpc_uri)
     b.run()

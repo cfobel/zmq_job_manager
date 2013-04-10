@@ -229,7 +229,7 @@ def parse_args():
 Worker data sink
 ----------------
 
-The data-sink process listens for messages from a `master` process containing
+The data-sink process listens for messages from a `manager` process containing
 updates from worker processes.  The data-sink saves any relevant information to
 a ZODB database, where the results are organized by worker UUID and task UUID.
 Several indexes also exist to look up a task based on other criteria, including

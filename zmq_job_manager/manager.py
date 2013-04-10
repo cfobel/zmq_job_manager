@@ -22,14 +22,14 @@ def get_seconds_since_epoch():
     return (datetime.now() - datetime(1970,1,1)).total_seconds()
 
 
-class Master(ZmqJsonRpcTask):
+class Manager(ZmqJsonRpcTask):
     def __init__(self, pub_uri, rpc_uri, hostname=None, **kwargs):
         if hostname is None:
             self.hostname = get_public_ip()
         else:
             self.hostname = hostname
         self._uris = OrderedDict(pub=pub_uri, rpc=rpc_uri)
-        super(Master, self).__init__(**kwargs)
+        super(Manager, self).__init__(**kwargs)
         self.sock_configs['pub'] = DeferredSocket(zmq.PUB).bind(pub_uri)
         self.pending_tasks = OrderedDict()
         self.running_tasks = OrderedDict()
@@ -195,7 +195,7 @@ def parse_args():
     """Parses arguments, returns (options, args)."""
     from argparse import ArgumentParser
 
-    parser = ArgumentParser(description='''Job manager master''')
+    parser = ArgumentParser(description='''Job manager manager''')
     parser.add_argument(nargs=1, dest='pub_uri', type=str)
     parser.add_argument(nargs=1, dest='rep_uri', type=str)
     args = parser.parse_args()
@@ -207,5 +207,5 @@ def parse_args():
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     args = parse_args()
-    m = Master(args.pub_uri, args.rep_uri)
+    m = Manager(args.pub_uri, args.rep_uri)
     m.run()

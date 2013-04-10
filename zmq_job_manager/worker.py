@@ -1,3 +1,4 @@
+import functools
 from multiprocessing import Pipe
 from datetime import datetime, timedelta
 from threading import Thread
@@ -16,7 +17,7 @@ import psutil
 import netifaces
 import eventlet
 from zmq.eventloop.ioloop import IOLoop, PeriodicCallback
-from zmq_helpers.rpc import ZmqJsonRpcProxy
+from zmq_helpers.rpc import ZmqJsonRpcProxy, HandlerMixin
 from zmq_helpers.utils import log_label
 from cpu_info.cpu_info import cpu_info, cpu_summary
 
@@ -59,7 +60,7 @@ def worker_info():
     return d
 
 
-class Worker(object):
+class Worker(HandlerMixin):
     def __init__(self, manager_uri, uuid=None, labels=tuple(), time_limit=None,
                  memory_limit=None, n_procs=1, n_threads=1):
         self.uris = OrderedDict(manager=manager_uri)
@@ -79,6 +80,70 @@ class Worker(object):
             self.uuid = str(uuid4())
         else:
             self.uuid = uuid
+        self.refresh_handler_methods()
+
+    def on__terminate(self, io_loop, manager, *args, **kwargs):
+        io_loop.stop()
+        manager.terminate_worker()
+
+    def timer__queue_monitor(self, io_loop, manager):
+        '''
+        Process any pending requests in our queue.
+        '''
+        requests = manager.request_queue()
+        for command, args, kwargs in requests:
+            logging.getLogger(log_label(self)).info(command)
+            handler = self.get_handler(command)
+            if handler:
+                handler(io_loop, manager, *args, **kwargs)
+
+    def timer__task_monitor(self, io_loop, manager):
+        '''
+        If the subprocess has finished,
+        gracefully.
+        '''
+        if self._task_thread is not None:
+            logging.getLogger(log_label(self)).debug('self._task_thread %s', self._task_thread)
+            if not self._task_thread.isAlive():
+                self._complete_task(manager, self._task_uuid, self._task)
+                self._task_thread.join()
+                del self._task_thread
+                self._task_thread = None
+                self._task_uuid = None
+                self._task = None
+                self._deferred = None
+            else:
+                self._task_thread.join(0.01)
+        elif self._deferred is None:
+            logging.getLogger(log_label(self)).debug('self._deferred %s', self._deferred)
+            self._deferred = manager.request_task.spawn()
+        elif self._deferred.ready():
+            result = pickle.loads(str(self._deferred.wait()))
+            if result:
+                logging.getLogger(log_label(self)).info('self._deferred is ready: %s', result)
+                task_uuid, task = result
+                self._task_thread = self.start_task(manager, task_uuid,
+                                                    task)
+                self._task_uuid = task_uuid
+                self._task = task
+            else:
+                del self._deferred
+                del self._task
+
+                self._task_thread = None
+                self._task_uuid = None
+                self._task = None
+                self._deferred = None
+        else:
+            eventlet.sleep(0.1)
+
+    def timer__heartbeat(self, io_loop, manager):
+        '''
+        Send a heartbeat request to the broker to notify that we are
+        still alive.
+        '''
+        logging.getLogger(log_label(self)).debug('')
+        manager.heartbeat()
 
     def run(self):
         manager = ZmqJsonRpcProxy(self.uris['manager'], uuid=self.uuid)
@@ -90,13 +155,6 @@ class Worker(object):
         # information.  This `worker_info` currently contains information
         # regarding the CPU and the network interfaces.
         manager.register_worker(worker_info())
-        logging.getLogger(log_label(self)).info(
-            'available handlers: %s' % (manager.available_handlers(), ))
-        logging.getLogger(log_label(self)).info(
-            'uris: %s' % (manager.get_uris(), ))
-        shell_command = 'python -m zmq_job_manager.test_task'
-        logging.getLogger(log_label(self)).info(
-            'register task: %s' % (manager.register_task(shell_command), ))
 
         io_loop = IOLoop()
         parent, child = Pipe()
@@ -105,59 +163,16 @@ class Worker(object):
         self._task = None
         self._deferred = None
 
-        def timer__task_monitor():
-            '''
-            If the subprocess has finished,
-            gracefully.
-            '''
-            if self._task_thread is not None:
-                logging.getLogger(log_label()).debug('self._task_thread %s', self._task_thread)
-                if not self._task_thread.isAlive():
-                    self._complete_task(manager, self._task_uuid, self._task)
-                    self._task_thread.join()
-                    del self._task_thread
-                    self._task_thread = None
-                    self._task_uuid = None
-                    self._task = None
-                    self._deferred = None
-                else:
-                    self._task_thread.join(0.01)
-            elif self._deferred is None:
-                logging.getLogger(log_label()).debug('self._deferred %s', self._deferred)
-                self._deferred = manager.request_task.spawn()
-            elif self._deferred.ready():
-                result = pickle.loads(str(self._deferred.wait()))
-                if result:
-                    logging.getLogger(log_label()).info('self._deferred is ready: %s', result)
-                    task_uuid, task = result
-                    self._task_thread = self.start_task(manager, task_uuid,
-                                                        task)
-                    self._task_uuid = task_uuid
-                    self._task = task
-                else:
-                    del self._deferred
-                    del self._task
-
-                    self._task_thread = None
-                    self._task_uuid = None
-                    self._task = None
-                    self._deferred = None
-            else:
-                eventlet.sleep(0.1)
-
-        def timer__heartbeat():
-            '''
-            Send a heartbeat request to the broker to notify that we are
-            still alive.
-            '''
-            logging.getLogger(log_label()).debug('')
-            manager.heartbeat()
-
         callbacks = OrderedDict()
-        callbacks['heartbeat'] = PeriodicCallback(timer__heartbeat, 4000,
-                                                    io_loop=io_loop)
-        callbacks['task_monitor'] = PeriodicCallback(timer__task_monitor, 2000,
-                                                    io_loop=io_loop)
+        callbacks['heartbeat'] = PeriodicCallback(
+            functools.partial(self.timer__heartbeat, io_loop, manager), 4000,
+            io_loop=io_loop)
+        callbacks['task_monitor'] = PeriodicCallback(
+            functools.partial(self.timer__task_monitor, io_loop, manager),
+            2000, io_loop=io_loop)
+        callbacks['queue_monitor'] = PeriodicCallback(
+            functools.partial(self.timer__queue_monitor, io_loop, manager),
+            2000, io_loop=io_loop)
 
         def _on_run():
             logging.getLogger(log_label()).info('')

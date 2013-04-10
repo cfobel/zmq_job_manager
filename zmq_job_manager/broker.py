@@ -130,6 +130,12 @@ class BrokerBase(ZmqJsonRpcTask):
         '''
         return True
 
+    def on__queue_worker_request(self, env, multipart_message, uuid, command,
+            *args, **kwargs):
+        self._data['worker_states'][uuid]._request_queue.append((command, args,
+            kwargs))
+        return len(self._data['worker_states'][uuid]._request_queue)
+
     def on__register_worker(self, env, multipart_message, uuid, worker_info,
                             affinity_labels=tuple(), end_time=None,
                             memory_limit=None):
@@ -145,6 +151,11 @@ class BrokerBase(ZmqJsonRpcTask):
             ('end_time', end_time),
             ('memory_limit', memory_limit),
         ])
+
+    def on__request_queue(self, env, multipart_message, uuid):
+        requests = self._data['worker_states'][uuid]._request_queue
+        self._data['worker_states'][uuid]._request_queue = []
+        return requests
 
     def on__request_task(self, env, multipart_message, worker_uuid):
         z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=worker_uuid)
@@ -304,7 +315,7 @@ class BrokerBase(ZmqJsonRpcTask):
                 self._data['workers']['flatlined'].remove(uuid)
                 logging.getLogger(log_label(self)).info(
                     'worker %s has revived - heartbeat_count=%s'
-                    % (uuid, heartbeat_count)
+                    % (uuid, worker._heartbeat_count)
                 )
                 z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=uuid)
                 z.revived_worker()

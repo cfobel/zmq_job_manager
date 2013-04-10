@@ -1,3 +1,4 @@
+import signal
 import functools
 from multiprocessing import Pipe
 from datetime import datetime, timedelta
@@ -16,13 +17,15 @@ except ImportError:
 import psutil
 import netifaces
 import eventlet
+from zmq.utils import jsonapi
 from zmq.eventloop.ioloop import IOLoop, PeriodicCallback
 from zmq_helpers.rpc import ZmqJsonRpcProxy, HandlerMixin
 from zmq_helpers.utils import log_label
 from cpu_info.cpu_info import cpu_info, cpu_summary
 
+from .master import get_seconds_since_epoch
 from .process import PopenPipeReactor
-from .constants import SERIALIZE__PICKLE
+from .constants import SERIALIZE__PICKLE, SERIALIZE__JSON
 from .worker_limits import extract_memory_limit, extract_runtime_limit
 
 
@@ -145,6 +148,14 @@ class Worker(HandlerMixin):
         logging.getLogger(log_label(self)).debug('')
         manager.heartbeat()
 
+    def handle_sigterm(self, io_loop, manager, *args, **kwargs):
+        logging.getLogger(log_label(self)).info('%s, %s', args, kwargs)
+        if self._task_thread is not None:
+            manager.store('__sigterm_caught__',
+                        jsonapi.dumps(get_seconds_since_epoch()),
+                        serialization=SERIALIZE__JSON)
+        self.on__terminate(io_loop, manager)
+
     def run(self):
         manager = ZmqJsonRpcProxy(self.uris['manager'], uuid=self.uuid)
         self.start_time = datetime.now()
@@ -181,6 +192,10 @@ class Worker(HandlerMixin):
                 time.sleep(0.1)
 
         io_loop.add_callback(_on_run)
+
+        signal.signal(signal.SIGTERM, functools.partial(self.handle_sigterm,
+                                                        io_loop, manager))
+        signal.siginterrupt(signal.SIGTERM, False)
 
         try:
             io_loop.start()

@@ -195,6 +195,8 @@ class WorkersSink(ZmqJsonRpcTask):
     def sub__store(self, message, serialization, key, value):
         if serialization == 'SERIALIZE__PICKLE':
             value = pickle.loads(value)
+        elif serialization == 'SERIALIZE__JSON':
+            value = jsonapi.loads(value)
         self.save(message.worker_uuid, message.task_uuid, key, value)
         logging.getLogger(log_label(self)).info('key=%s value=%s', key, value)
 

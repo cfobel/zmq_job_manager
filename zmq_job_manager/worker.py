@@ -142,7 +142,7 @@ class Worker(HandlerMixin):
 
     def timer__heartbeat(self, io_loop, manager):
         '''
-        Send a heartbeat request to the broker to notify that we are
+        Send a heartbeat request to the supervisor to notify that we are
         still alive.
         '''
         logging.getLogger(log_label(self)).debug('')
@@ -162,7 +162,7 @@ class Worker(HandlerMixin):
         if self.config['time_limit']:
             delta = max(timedelta(), self.config['time_limit'] - timedelta(minutes=5))
             self.end_time = self.start_time + delta
-        # Notify broker that we're alive and send our configuration
+        # Notify supervisor that we're alive and send our configuration
         # information.  This `worker_info` currently contains information
         # regarding the CPU and the network interfaces.
         manager.register_worker(worker_info())
@@ -209,7 +209,7 @@ class Worker(HandlerMixin):
         # Run an IO-loop here, to allow useful work while the subprocess is
         # run in the background thread, `t`.
         self._env = os.environ.copy()
-        self._env.update({'ZMQ_JOB_MANAGER__BROKER_URI': self.uris['manager'],
+        self._env.update({'ZMQ_JOB_MANAGER__SUPERVISOR_URI': self.uris['manager'],
                           'ZMQ_JOB_MANAGER__WORKER_UUID': self.uuid,
                           'ZMQ_JOB_MANAGER__TASK_UUID': task_uuid})
 

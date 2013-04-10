@@ -30,19 +30,19 @@ class WorkerState(object):
         self._starting_heartbeat_count = value
 
 
-class BrokerBase(ZmqJsonRpcTask):
-    def __init__(self, dealer_uri, router_uri, dealer_bind=False, **kwargs):
+class SupervisorBase(ZmqJsonRpcTask):
+    def __init__(self, master_rpc_uri, rpc_uri, master_rpc_bind=False, **kwargs):
         self._uris = OrderedDict()
-        self._uris['rpc'] = router_uri
-        self._uris['dealer'] = dealer_uri
+        self._uris['rpc'] = rpc_uri
+        self._uris['master_rpc'] = master_rpc_uri
         self._remote_handlers = set()
         self._data = None
-        super(BrokerBase, self).__init__(on_run=self.on_run, **kwargs)
+        super(SupervisorBase, self).__init__(on_run=self.on_run, **kwargs)
 
     def _initial_data(self):
         '''
-        By initializing data using a method, the broker may be sub-classed to,
-        for example, provide persistent storage, allowing the process to be
+        By initializing data using a method, the supervisor may be sub-classed
+        to, for example, provide persistent storage, allowing the process to be
         stopped and restarted while maintaining state.
         '''
         data = {
@@ -76,7 +76,7 @@ class BrokerBase(ZmqJsonRpcTask):
         return data
 
     def on_run(self, ctx, io_loop, socks, streams):
-        z = ZmqJsonRpcProxy(self._uris['dealer'])
+        z = ZmqJsonRpcProxy(self._uris['master_rpc'])
         self._data = self._initial_data()
         self._remote_handlers = set(z.available_handlers())
         env = OrderedDict([
@@ -100,11 +100,11 @@ class BrokerBase(ZmqJsonRpcTask):
     def on__begin_task(self, env, multipart_message, uuid, task_uuid,
                        **kwargs):
         self._data['worker_states'][uuid]._task_uuid = task_uuid
-        z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=uuid)
+        z = ZmqJsonRpcProxy(self._uris['master_rpc'], uuid=uuid)
         result = z.begin_task(task_uuid, **kwargs)
         return result
 
-    def on__broker_hello_world(self, env, multipart_message, uuid):
+    def on__supervisor_hello_world(self, env, multipart_message, uuid):
         message = '[%s] hello world (%s)' % (datetime.now(), uuid)
         logging.getLogger(log_label(self)).info(message)
         return message
@@ -158,7 +158,7 @@ class BrokerBase(ZmqJsonRpcTask):
         return requests
 
     def on__request_task(self, env, multipart_message, worker_uuid):
-        z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=worker_uuid)
+        z = ZmqJsonRpcProxy(self._uris['master_rpc'], uuid=worker_uuid)
         result = z.request_task(self._data['worker_infos'][worker_uuid])
         return result
 
@@ -174,7 +174,7 @@ class BrokerBase(ZmqJsonRpcTask):
         if not command in self._handler_methods:
             if command in self._remote_handlers:
                 def _do_command(env, multipart_message, uuid, *args, **kwargs):
-                    z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=uuid)
+                    z = ZmqJsonRpcProxy(self._uris['master_rpc'], uuid=uuid)
                     return getattr(z, command)(*args, **kwargs)
                 return _do_command
             self.refresh_handler_methods()
@@ -204,7 +204,7 @@ class BrokerBase(ZmqJsonRpcTask):
     def get_uris(self):
         return self._uris
 
-    def process_dealer_response(self, env, multipart_message):
+    def process_master_rpc_response(self, env, multipart_message):
         # We received a response to the dealer socket, so we need to forward
         # the message back to the job that requested through the router socket.
         sender_uuid = self.deserialize_frame(multipart_message[2])
@@ -257,7 +257,7 @@ class BrokerBase(ZmqJsonRpcTask):
         `terminate_worker(self, env, uuid)` accordingly.
         '''
         def get_z():
-            return ZmqJsonRpcProxy(self._uris['dealer'], uuid=worker_uuid)
+            return ZmqJsonRpcProxy(self._uris['master_rpc'], uuid=worker_uuid)
 
         z = None
 
@@ -317,7 +317,7 @@ class BrokerBase(ZmqJsonRpcTask):
                     'worker %s has revived - heartbeat_count=%s'
                     % (uuid, worker._heartbeat_count)
                 )
-                z = ZmqJsonRpcProxy(self._uris['dealer'], uuid=uuid)
+                z = ZmqJsonRpcProxy(self._uris['master_rpc'], uuid=uuid)
                 z.revived_worker()
 
     def unpack_request(self, multipart_message):
@@ -333,10 +333,10 @@ class BrokerBase(ZmqJsonRpcTask):
         # the message back to when we receive a response on the `DEALER`
         # socket.
         message = multipart_message[2:]
-        return super(BrokerBase, self).unpack_request(message)
+        return super(SupervisorBase, self).unpack_request(message)
 
 
-class Broker(BrokerBase):
+class Supervisor(SupervisorBase):
     def create_worker(self, env, worker_uuid, *args, **kwargs):
         '''
         Create worker subprocess.
@@ -365,7 +365,7 @@ class Broker(BrokerBase):
 
         env = os.environ
         env.update(kwargs.pop('env', {}))
-        broker_connect_uri = self.uris['rpc'].replace(r'tcp://*', r'tcp://%s' %
+        supervisor_connect_uri = self.uris['rpc'].replace(r'tcp://*', r'tcp://%s' %
                                                       (platform.node()))
         command = ('bash -c "'
             '. /usr/local/bin/virtualenvwrapper.sh &&'
@@ -374,7 +374,7 @@ class Broker(BrokerBase):
             'mkdir -p worker_envs/%(uuid)s && '
             'cd worker_envs/%(uuid)s && '
             'python -m zmq_job_manager.worker %(uri)s %(uuid)s"'
-            % {'uuid': worker_uuid, 'uri': broker_connect_uri}
+            % {'uuid': worker_uuid, 'uri': supervisor_connect_uri}
         )
         self._worker_subprocesses[worker_uuid] = Popen(command, shell=True,
                                                        env=env, stdout=PIPE,
@@ -385,10 +385,10 @@ class Broker(BrokerBase):
 
     def terminate_worker(self, env, worker_uuid):
         '''
-        If a worker subprocess has been launched by the broker for the
+        If a worker subprocess has been launched by the supervisor for the
         specified worker uuid, terminate the subprocess.
         '''
-        super(Broker, self).terminate_worker(env, worker_uuid)
+        super(Supervisor, self).terminate_worker(env, worker_uuid)
         if hasattr(self, '_worker_subprocesses'):
             if worker_uuid in self._worker_subprocesses:
                 logging.getLogger(log_label(self)).info('terminate_worker: %s',
@@ -412,7 +412,7 @@ class Broker(BrokerBase):
         '''
         Terminate any subprocesses that are still running.
         '''
-        super(Broker, self).__del__()
+        super(Supervisor, self).__del__()
         if hasattr(self, '_worker_subprocesses'):
             for uuid, p in self._worker_subprocesses:
                 try:
@@ -425,14 +425,30 @@ class Broker(BrokerBase):
 
 def parse_args():
     """Parses arguments, returns (options, args)."""
-    from argparse import ArgumentParser
+    from argparse import ArgumentParser, RawDescriptionHelpFormatter
 
-    parser = ArgumentParser(description='''Router-to dealer broker''')
-    parser.add_argument(nargs=1, dest='router_uri', type=str)
-    parser.add_argument(nargs=1, dest='dealer_uri', type=str)
+    parser = ArgumentParser(formatter_class=RawDescriptionHelpFormatter,
+                            description='''
+Worker supervisor process
+-------------------------
+
+This process supervises a set of worker processes.  Each worker process:
+
+ 1. Registers itself with the supervisor.
+ 2. Requests a task to perform.
+ 3. Runs task in subprocess.
+ 4. While the task is running in the subprocess, the main worker thread sends
+    various worker-related info to the supervisor, including system CPU/memory
+    info, start time, completion time, along with any output from the task
+    subprocess to `stdout` or `stderr`.
+ 5. Notifies supervisor when task has been completed or terminated.
+ 6. Repeat steps 2-6 until a worker terminate request is received.
+    '''.strip())
+    parser.add_argument(nargs=1, dest='rpc_uri', type=str)
+    parser.add_argument(nargs=1, dest='master_rpc_uri', type=str)
     args = parser.parse_args()
-    args.router_uri = args.router_uri[0]
-    args.dealer_uri = args.dealer_uri[0]
+    args.rpc_uri = args.rpc_uri[0]
+    args.master_rpc_uri = args.master_rpc_uri[0]
     return args
 
 
@@ -440,5 +456,5 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     #logging.basicConfig(level=logging.CRITICAL)
     args = parse_args()
-    b = Broker(args.dealer_uri, args.router_uri)
+    b = Supervisor(args.master_rpc_uri, args.rpc_uri)
     b.run()

@@ -1,0 +1,2 @@
+#!/bin/bash
+python -m zmq_job_manager.worker $1 $2 >> ~/.zmq_job_manager/worker_logs/$2.log 2>&1

@@ -178,7 +178,8 @@ class BrokerBase(ZmqJsonRpcTask):
         '''
         if request['sender_uuid'] in self._data['worker_states']:
             self._data['worker_states'][request['sender_uuid']].reset_heartbeat()
-        print log_label(self), request['command']
+        if request['command'] not in ('heartbeat', ):
+            logging.getLogger(log_label(self)).info(request['command'])
         return handler(env, multipart_message, request['sender_uuid'],
                        *request['args'], **request['kwargs'])
 
@@ -229,8 +230,9 @@ class BrokerBase(ZmqJsonRpcTask):
         data.insert(0, self.serialize_frame(response['timestamp']))
         data.append(error)
         data = multipart_message[:2] + data
-        logging.getLogger(log_label(self)).info(
-                'request: uuid=%(sender_uuid)s command=%(command)s' % request)
+        if request['command'] not in ('heartbeat', ):
+            logging.getLogger(log_label(self)).info('request: '
+                    'uuid=%(sender_uuid)s command=%(command)s' % request)
         socks[self.rpc_sock_name].send_multipart(data)
 
     def terminate_worker(self, env, worker_uuid):

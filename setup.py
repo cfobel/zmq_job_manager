@@ -11,4 +11,5 @@ setup(name = 'zmq_job_manager',
     license = 'GPL',
     long_description = '''''',
     packages = ['zmq_job_manager'],
+    scripts = ['scripts/launch_worker']
 )

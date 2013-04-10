@@ -77,7 +77,6 @@ class DeferredPopen(object):
             popen_class = _kwargs.pop('popen_class')
         else:
             popen_class = self._popen_class
-        print '[make]', _kwargs
         return popen_class(*_args, **_kwargs)
 
 

@@ -94,92 +94,113 @@ class Worker(object):
             'available handlers: %s' % (manager.available_handlers(), ))
         logging.getLogger(log_label(self)).info(
             'uris: %s' % (manager.get_uris(), ))
-        #logging.getLogger(log_label(self)).info(
-            #'broker hello world: %s' % (manager.broker_hello_world(), ))
-        #shell_command = 'echo "[start] $(date)"; sleep 1; '\
-                #'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
         shell_command = 'python -m zmq_job_manager.test_task'
-        #'echo "[mid] $(date)"; sleep 1; echo "[end] $(date)";'
         logging.getLogger(log_label(self)).info(
             'register task: %s' % (manager.register_task(shell_command), ))
-        #while True:
-        if manager.pending_task_ids():
-            d = manager.request_task.spawn()
-            while not d.ready():
-                eventlet.sleep(0.01)
-            task_uuid, task = pickle.loads(str(d.wait()))
-            self.run_task(manager, task_uuid, task)
 
-    def run_task(self, manager, task_uuid, task):
+        io_loop = IOLoop()
+        parent, child = Pipe()
+        self._task_thread = None
+        self._task_uuid = None
+        self._task = None
+        self._deferred = None
+
+        def timer__task_monitor():
+            '''
+            If the subprocess has finished,
+            gracefully.
+            '''
+            if self._task_thread is not None:
+                logging.getLogger(log_label()).debug('self._task_thread %s', self._task_thread)
+                if not self._task_thread.isAlive():
+                    self._complete_task(manager, self._task_uuid, self._task)
+                    self._task_thread.join()
+                    del self._task_thread
+                    self._task_thread = None
+                    self._task_uuid = None
+                    self._task = None
+                    self._deferred = None
+                else:
+                    self._task_thread.join(0.01)
+            elif self._deferred is None:
+                logging.getLogger(log_label()).debug('self._deferred %s', self._deferred)
+                self._deferred = manager.request_task.spawn()
+            elif self._deferred.ready():
+                result = pickle.loads(str(self._deferred.wait()))
+                if result:
+                    logging.getLogger(log_label()).info('self._deferred is ready: %s', result)
+                    task_uuid, task = result
+                    self._task_thread = self.start_task(manager, task_uuid,
+                                                        task)
+                    self._task_uuid = task_uuid
+                    self._task = task
+                else:
+                    del self._deferred
+                    del self._task
+
+                    self._task_thread = None
+                    self._task_uuid = None
+                    self._task = None
+                    self._deferred = None
+            else:
+                eventlet.sleep(0.1)
+
+        def timer__heartbeat():
+            '''
+            Send a heartbeat request to the broker to notify that we are
+            still alive.
+            '''
+            logging.getLogger(log_label()).debug('')
+            manager.heartbeat()
+
+        callbacks = OrderedDict()
+        callbacks['heartbeat'] = PeriodicCallback(timer__heartbeat, 4000,
+                                                    io_loop=io_loop)
+        callbacks['task_monitor'] = PeriodicCallback(timer__task_monitor, 2000,
+                                                    io_loop=io_loop)
+
+        def _on_run():
+            logging.getLogger(log_label()).info('')
+            for c in callbacks.values():
+                c.start()
+                time.sleep(0.1)
+
+        io_loop.add_callback(_on_run)
+
+        try:
+            io_loop.start()
+        except KeyboardInterrupt:
+            pass
+
+    def start_task(self, manager, task_uuid, task):
         # Run a task in a subprocess, forwarding any `stdout` or `stderr`
         # output to manager.
-        logging.getLogger(log_label(self)).info('request_task: %s' % (task, ))
-        if task:
-            # Run an IO-loop here, to allow useful work while the subprocess is
-            # run in the background thread, `t`.
-            env = os.environ.copy()
-            env.update({'ZMQ_JOB_MANAGER__BROKER_URI': self.uris['manager'],
-                        'ZMQ_JOB_MANAGER__WORKER_UUID': self.uuid,
-                        'ZMQ_JOB_MANAGER__TASK_UUID': task_uuid})
+        logging.getLogger(log_label(self)).info(task_uuid)
+        # Run an IO-loop here, to allow useful work while the subprocess is
+        # run in the background thread, `t`.
+        self._env = os.environ.copy()
+        self._env.update({'ZMQ_JOB_MANAGER__BROKER_URI': self.uris['manager'],
+                          'ZMQ_JOB_MANAGER__WORKER_UUID': self.uuid,
+                          'ZMQ_JOB_MANAGER__TASK_UUID': task_uuid})
 
-            p = task.make(popen_class=ProxyPopen, env=env)
-            t = Thread(target=p.communicate, args=(manager, ))
-            t.daemon = True
-            t.start()
-            io_loop = IOLoop()
-            parent, child = Pipe()
+        p = task.make(popen_class=ProxyPopen, env=self._env)
+        task_thread = Thread(target=p.communicate, args=(manager, ))
+        task_thread.daemon = True
+        task_thread.start()
+        self._begin_task(manager, task_uuid, task)
+        return task_thread
 
-            def timer__completed():
-                '''
-                If the subprocess has finished, stop the IO-loop to exit
-                gracefully.
-                '''
-                if not t.isAlive():
-                    child.send('STOP')
-                else:
-                    t.join(0.01)
+    def _begin_task(self, manager, task_uuid, task):
+        manager.store('__task__', pickle.dumps(task),
+                        serialization=SERIALIZE__PICKLE)
+        manager.store('__env__', pickle.dumps(self._env),
+                        serialization=SERIALIZE__PICKLE)
+        manager.begin_task(task_uuid)
 
-            def timer__watchdog():
-                '''
-                If there is a request to stop the IO-loop, do so.
-                '''
-                if parent.poll():
-                    io_loop.stop()
-
-            def timer__heartbeat():
-                '''
-                Send a heartbeat request to the broker to notify that we are
-                still alive.
-                '''
-                manager.heartbeat()
-
-            callbacks = OrderedDict()
-            callbacks['heartbeat'] = PeriodicCallback(timer__heartbeat, 4000,
-                                                      io_loop=io_loop)
-            callbacks['watchdog'] = PeriodicCallback(timer__watchdog, 500,
-                                                     io_loop=io_loop)
-            callbacks['completed'] = PeriodicCallback(timer__completed, 500,
-                                                      io_loop=io_loop)
-            def _on_run():
-                for c in callbacks.values():
-                    c.start()
-                    time.sleep(0.1)
-                manager.store('__task__', pickle.dumps(task),
-                             serialization=SERIALIZE__PICKLE)
-                manager.store('__env__', pickle.dumps(env),
-                             serialization=SERIALIZE__PICKLE)
-                manager.begin_task(task_uuid)
-
-            io_loop.add_callback(_on_run)
-
-            try:
-                io_loop.start()
-            except KeyboardInterrupt:
-                pass
-
-            manager.store('done', pickle.dumps(datetime.now()),
-                         serialization=SERIALIZE__PICKLE)
-            manager.complete_task(task_uuid)
+    def _complete_task(self, manager, task_uuid, task):
+        manager.store('done', pickle.dumps(datetime.now()),
+                        serialization=SERIALIZE__PICKLE)
+        manager.complete_task(task_uuid)
 
 
 def parse_args():
@@ -200,7 +221,7 @@ def parse_args():
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s-%(name)s-%(levelname)s:%(message)s")
     args = parse_args()
     w = Worker(args.manager_uri, uuid=args.worker_uuid,
                time_limit=args.time_limit,

@@ -175,7 +175,6 @@ class SupervisorBase(ZmqRpcTask):
         is not found in the dictionary of handler methods, refresh the
         dictionary to be sure the handler is still not available.
         '''
-        print self._handler_methods.keys()
         if not command in self._handler_methods['rpc__']:
             if command in self._remote_handlers:
                 def _do_command(env, multipart_message, uuid, *args, **kwargs):

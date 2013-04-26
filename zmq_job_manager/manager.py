@@ -11,7 +11,7 @@ except ImportError:
 import zmq
 from zmq.utils import jsonapi
 from zmq_helpers.socket_configs import DeferredSocket
-from zmq_helpers.rpc import ZmqJsonRpcTask
+from zmq_helpers.rpc import ZmqRpcTask
 from zmq_helpers.utils import log_label, get_public_ip
 
 from .process import DeferredPopen
@@ -22,7 +22,7 @@ def get_seconds_since_epoch():
     return (datetime.now() - datetime(1970,1,1)).total_seconds()
 
 
-class Manager(ZmqJsonRpcTask):
+class Manager(ZmqRpcTask):
     def __init__(self, pub_uri, rpc_uri, hostname=None, **kwargs):
         if hostname is None:
             self.hostname = get_public_ip()
@@ -47,7 +47,7 @@ class Manager(ZmqJsonRpcTask):
     def get_task(self, env, worker_uuid, worker_info):
         return self.pending_tasks.popitem(0)
 
-    def on__get_uris(self, env, uuid, *args, **kwargs):
+    def rpc__get_uris(self, env, uuid, *args, **kwargs):
         return OrderedDict([(k, u.replace(r'tcp://*', r'tcp://%s' %
                                           self.hostname))
                             for k, u in self.get_uris().items()])
@@ -56,7 +56,7 @@ class Manager(ZmqJsonRpcTask):
         data = [uuid, task_uuid, '%.6f' % get_seconds_since_epoch(), command] + list(args)
         env['socks']['pub'].send_multipart(data)
 
-    def on__store(self, env, uuid, key, value, task_uuid=None,
+    def rpc__store(self, env, uuid, key, value, task_uuid=None,
                   serialization=SERIALIZE__NONE):
         if task_uuid is None and uuid in self.task_by_worker:
             task_uuid = self.task_by_worker[uuid]
@@ -66,30 +66,30 @@ class Manager(ZmqJsonRpcTask):
             self.publish(env, uuid, task_uuid, 'store', serialization, key, value)
             return message
 
-    def on__stdout(self, env, uuid, value):
-        message = self._on__std_base(env, uuid, 'stdout', value)
+    def rpc__stdout(self, env, uuid, value):
+        message = self._rpc__std_base(env, uuid, 'stdout', value)
         logging.getLogger(log_label(self)).info(message)
         return message
 
-    def on__stderr(self, env, uuid, value):
-        message = self._on__std_base(env, uuid, 'stderr', value)
+    def rpc__stderr(self, env, uuid, value):
+        message = self._rpc__std_base(env, uuid, 'stderr', value)
         logging.getLogger(log_label(self)).info(message)
         return message
 
-    def _on__std_base(self, env, uuid, stream_name, value):
+    def _rpc__std_base(self, env, uuid, stream_name, value):
         if uuid in self.task_by_worker:
             task_uuid = self.task_by_worker[uuid]
             message = '[%s] uuid=%s\n%s' % (log_label(self), uuid, value)
             self.publish(env, uuid, task_uuid, stream_name, value)
             return message
 
-    def on__running_task_ids(self, env, uuid):
+    def rpc__running_task_ids(self, env, uuid):
         return self.running_tasks.keys()
 
-    def on__pending_task_ids(self, env, uuid):
+    def rpc__pending_task_ids(self, env, uuid):
         return self.pending_tasks.keys()
 
-    def on__completed_task_ids(self, env, uuid):
+    def rpc__completed_task_ids(self, env, uuid):
         return self.completed_tasks.keys()
 
     def assign_task(self, worker_uuid, task_uuid, task):
@@ -98,18 +98,18 @@ class Manager(ZmqJsonRpcTask):
         self.worker_by_task[task_uuid] = worker_uuid
         self.task_by_worker[worker_uuid] = task_uuid
 
-    def on__get_worker_task_uuid(self, env, uuid, worker_uuid):
+    def rpc__get_worker_task_uuid(self, env, uuid, worker_uuid):
         return self.task_by_worker.get(worker_uuid)
 
-    def on__get_task_worker_uuid(self, env, uuid, task_uuid):
+    def rpc__get_task_worker_uuid(self, env, uuid, task_uuid):
         return self.worker_by_task.get(task_uuid)
 
-    def on__get_task_command(self, env, uuid, task_uuid):
-        tasks = getattr(self, '%s_tasks' % self.on__get_task_state(env, uuid,
+    def rpc__get_task_command(self, env, uuid, task_uuid):
+        tasks = getattr(self, '%s_tasks' % self.rpc__get_task_state(env, uuid,
                                                                    task_uuid))
         return tasks[task_uuid]._args[0]
 
-    def on__get_task_state(self, env, uuid, task_uuid):
+    def rpc__get_task_state(self, env, uuid, task_uuid):
         if task_uuid in self.pending_tasks:
             return 'pending'
         elif task_uuid in self.running_tasks:
@@ -119,7 +119,7 @@ class Manager(ZmqJsonRpcTask):
         else:
             raise KeyError, 'No task found for uuid: %s' % task_uuid
 
-    def on__request_task(self, env, uuid, worker_info):
+    def rpc__request_task(self, env, uuid, worker_info):
         if not hasattr(self, '_worker_infos'):
             self._worker_infos = OrderedDict()
         self._worker_infos[uuid] = worker_info
@@ -131,7 +131,7 @@ class Manager(ZmqJsonRpcTask):
             result = None
         return pickle.dumps(result)
 
-    def on__begin_task(self, env, uuid, task_uuid, seconds_since_epoch=None):
+    def rpc__begin_task(self, env, uuid, task_uuid, seconds_since_epoch=None):
         if task_uuid in self.running_tasks:
             if seconds_since_epoch is None:
                 seconds_since_epoch = get_seconds_since_epoch()
@@ -140,19 +140,19 @@ class Manager(ZmqJsonRpcTask):
                          jsonapi.dumps(self._worker_infos.get(uuid)),
                          SERIALIZE__JSON)
 
-    def on__terminate_worker(self, env, uuid, seconds_since_epoch=None):
+    def rpc__terminate_worker(self, env, uuid, seconds_since_epoch=None):
         self._publish_with_time_float(env, uuid, '', 'terminated_worker',
                                       seconds_since_epoch)
 
-    def on__flatlined_worker(self, env, uuid, seconds_since_epoch=None):
+    def rpc__flatlined_worker(self, env, uuid, seconds_since_epoch=None):
         self._publish_with_time_float(env, uuid, '', 'flatlined_worker',
                                       seconds_since_epoch)
 
-    def on__get_worker_info(self, env, uuid, worker_uuid):
+    def rpc__get_worker_info(self, env, uuid, worker_uuid):
         if hasattr(self, '_worker_infos'):
             return self._worker_infos.get(worker_uuid)
 
-    def on__revived_worker(self, env, uuid, seconds_since_epoch=None):
+    def rpc__revived_worker(self, env, uuid, seconds_since_epoch=None):
         self._publish_with_time_float(env, uuid, '', 'revived_worker',
                                       seconds_since_epoch)
 
@@ -163,13 +163,13 @@ class Manager(ZmqJsonRpcTask):
         self.publish(env, worker_uuid, task_uuid, command, '%.6f' %
                      seconds_since_epoch)
 
-    def on__uncomplete_task(self, env, uuid, task_uuid):
+    def rpc__uncomplete_task(self, env, uuid, task_uuid):
         if task_uuid in self.completed_tasks:
             t = self.completed_tasks[task_uuid]
             del self.completed_tasks[task_uuid]
             self.running_tasks[task_uuid] = t
 
-    def on__complete_task(self, env, uuid, task_uuid, seconds_since_epoch=None):
+    def rpc__complete_task(self, env, uuid, task_uuid, seconds_since_epoch=None):
         if task_uuid in self.running_tasks:
             t = self.running_tasks[task_uuid]
             del self.running_tasks[task_uuid]
@@ -179,14 +179,14 @@ class Manager(ZmqJsonRpcTask):
             self.publish(env, uuid, task_uuid, 'complete_task',
                          '%.6f' % seconds_since_epoch)
 
-    def on__register_task(self, env, uuid, shell_command):
+    def rpc__register_task(self, env, uuid, shell_command):
         task_uuid = str(uuid4())
         self.pending_tasks[task_uuid] = DeferredPopen([shell_command],
                                                       shell=True, stdout=PIPE,
                                                       stderr=PIPE)
         return task_uuid
 
-    def on__queue_worker_request(self, env, uuid, worker_uuid, command, *args,
+    def rpc__queue_worker_request(self, env, uuid, worker_uuid, command, *args,
                                  **kwargs):
         pass
 

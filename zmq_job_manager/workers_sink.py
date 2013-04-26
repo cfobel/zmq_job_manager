@@ -10,7 +10,7 @@ import transaction
 import zmq
 from zmq.utils import jsonapi
 from zmq_helpers.socket_configs import DeferredSocket
-from zmq_helpers.rpc import ZmqJsonRpcTask
+from zmq_helpers.rpc import ZmqRpcTask
 from zmq_helpers.utils import log_label
 from path import path
 from persistent_helpers.ordered_dict import PersistentOrderedDict
@@ -41,7 +41,7 @@ class SubMessage(object):
         return u'SubMessage(%s)' % ', '.join(args)
 
 
-class WorkersSink(ZmqJsonRpcTask):
+class WorkersSink(ZmqRpcTask):
     default_data_dir = path('~/.workers_sink').expand()
     default_db_name = 'zeo.socket'
 
@@ -135,7 +135,7 @@ class WorkersSink(ZmqJsonRpcTask):
             result.makedirs_p()
         return result
 
-    def _on__std_base(self, message, data, stream_name):
+    def _rpc__std_base(self, message, data, stream_name):
         std_path = self._message_data_dir(message).joinpath(stream_name)
         std = std_path.open('a')
         std.write(data)
@@ -144,10 +144,10 @@ class WorkersSink(ZmqJsonRpcTask):
                                                 stream_name, std_path)
 
     def sub__stdout(self, message, data):
-        self._on__std_base(message, data, 'stdout')
+        self._rpc__std_base(message, data, 'stdout')
 
     def sub__stderr(self, message, data):
-        self._on__std_base(message, data, 'stderr')
+        self._rpc__std_base(message, data, 'stderr')
 
     def sub__begin_task(self, message, seconds_since_epoch_str, worker_info,
                         serialization):
@@ -206,13 +206,13 @@ class WorkersSink(ZmqJsonRpcTask):
         if f and hasattr(f, '__call__'):
             f(message, *message.args)
 
-    def on__unregister_worker(self, env, uuid, worker_uuid):
+    def rpc__unregister_worker(self, env, uuid, worker_uuid):
         if worker_uuid in self._registered_workers:
             env['socks']['sub'].setsockopt(zmq.UNSUBSCRIBE, worker_uuid)
             self._registered_workers.remove(worker_uuid)
         logging.getLogger(log_label(self)).info(worker_uuid)
 
-    def on__register_worker(self, env, uuid, worker_uuid):
+    def rpc__register_worker(self, env, uuid, worker_uuid):
         if not self._registered_workers and self._init_subscribe is not None:
             env['socks']['sub'].setsockopt(zmq.UNSUBSCRIBE, self._init_subscribe)
         env['socks']['sub'].setsockopt(zmq.SUBSCRIBE, worker_uuid)

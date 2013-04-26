@@ -19,7 +19,7 @@ import netifaces
 import eventlet
 from zmq.utils import jsonapi
 from zmq.eventloop.ioloop import IOLoop, PeriodicCallback
-from zmq_helpers.rpc import ZmqJsonRpcProxy, HandlerMixin
+from zmq_helpers.rpc import ZmqRpcProxy, RpcHandlerMixin
 from zmq_helpers.utils import log_label
 from cpu_info.cpu_info import cpu_info, cpu_summary
 
@@ -63,7 +63,7 @@ def worker_info():
     return d
 
 
-class Worker(HandlerMixin):
+class Worker(RpcHandlerMixin):
     def __init__(self, supervisor_uri, uuid=None, labels=tuple(),
                  time_limit=None, memory_limit=None, n_procs=1, n_threads=1):
         self.uris = OrderedDict(supervisor=supervisor_uri)
@@ -85,7 +85,7 @@ class Worker(HandlerMixin):
             self.uuid = uuid
         self.refresh_handler_methods()
 
-    def on__terminate(self, io_loop, supervisor, *args, **kwargs):
+    def rpc__terminate(self, io_loop, supervisor, *args, **kwargs):
         io_loop.stop()
         supervisor.terminate_worker()
 
@@ -154,10 +154,10 @@ class Worker(HandlerMixin):
             supervisor.store('__sigterm_caught__',
                         jsonapi.dumps(get_seconds_since_epoch()),
                         serialization=SERIALIZE__JSON)
-        self.on__terminate(io_loop, supervisor)
+        self.rpc__terminate(io_loop, supervisor)
 
     def run(self):
-        supervisor = ZmqJsonRpcProxy(self.uris['supervisor'], uuid=self.uuid)
+        supervisor = ZmqRpcProxy(self.uris['supervisor'], uuid=self.uuid)
         self.start_time = datetime.now()
         print self.config
         if self.config['time_limit']:

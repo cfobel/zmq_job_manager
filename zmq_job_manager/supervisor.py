@@ -7,7 +7,7 @@ from uuid import uuid1
 import zmq
 from zmq.eventloop.ioloop import PeriodicCallback
 from zmq_helpers.socket_configs import DeferredSocket
-from zmq_helpers.rpc import ZmqJsonRpcTask, ZmqJsonRpcProxy
+from zmq_helpers.rpc import ZmqRpcTask, ZmqRpcProxy
 from zmq_helpers.utils import log_label
 
 
@@ -30,7 +30,7 @@ class WorkerState(object):
         self._starting_heartbeat_count = value
 
 
-class SupervisorBase(ZmqJsonRpcTask):
+class SupervisorBase(ZmqRpcTask):
     def __init__(self, manager_rpc_uri, rpc_uri, manager_rpc_bind=False, **kwargs):
         self._uris = OrderedDict()
         self._uris['rpc'] = rpc_uri
@@ -76,7 +76,7 @@ class SupervisorBase(ZmqJsonRpcTask):
         return data
 
     def on_run(self, ctx, io_loop, socks, streams):
-        z = ZmqJsonRpcProxy(self._uris['manager_rpc'])
+        z = ZmqRpcProxy(self._uris['manager_rpc'])
         self._data = self._initial_data()
         self._remote_handlers = set(z.available_handlers())
         env = OrderedDict([
@@ -92,24 +92,24 @@ class SupervisorBase(ZmqJsonRpcTask):
         callback = PeriodicCallback(f, 5000, io_loop=io_loop)
         callback.start()
 
-    def on__available_handlers(self, env, *args, **kwargs):
+    def rpc__available_handlers(self, env, *args, **kwargs):
         return sorted(
-            set(self.handler_methods.keys()).union(self._remote_handlers)
+            set(self.handler_methods['rpc__'].keys()).union(self._remote_handlers)
         )
 
-    def on__begin_task(self, env, multipart_message, uuid, task_uuid,
+    def rpc__begin_task(self, env, multipart_message, uuid, task_uuid,
                        **kwargs):
         self._data['worker_states'][uuid]._task_uuid = task_uuid
-        z = ZmqJsonRpcProxy(self._uris['manager_rpc'], uuid=uuid)
+        z = ZmqRpcProxy(self._uris['manager_rpc'], uuid=uuid)
         result = z.begin_task(task_uuid, **kwargs)
         return result
 
-    def on__supervisor_hello_world(self, env, multipart_message, uuid):
+    def rpc__supervisor_hello_world(self, env, multipart_message, uuid):
         message = '[%s] hello world (%s)' % (datetime.now(), uuid)
         logging.getLogger(log_label(self)).info(message)
         return message
 
-    def on__create_worker(self, env, multipart_message, uuid, *args, **kwargs):
+    def rpc__create_worker(self, env, multipart_message, uuid, *args, **kwargs):
         '''
         Create a new worker and return the worker's uuid.
         '''
@@ -123,20 +123,20 @@ class SupervisorBase(ZmqJsonRpcTask):
             self._data['workers']['pending_create'].add(result)
         return result
 
-    def on__heartbeat(self, env, multipart_message, uuid):
+    def rpc__heartbeat(self, env, multipart_message, uuid):
         '''
         Do nothing here, since heart-beat count is reset in the `call_handler`
         method.
         '''
         return True
 
-    def on__queue_worker_request(self, env, multipart_message, uuid, command,
+    def rpc__queue_worker_request(self, env, multipart_message, uuid, command,
             *args, **kwargs):
         self._data['worker_states'][uuid]._request_queue.append((command, args,
             kwargs))
         return len(self._data['worker_states'][uuid]._request_queue)
 
-    def on__register_worker(self, env, multipart_message, uuid, worker_info,
+    def rpc__register_worker(self, env, multipart_message, uuid, worker_info,
                             affinity_labels=tuple(), end_time=None,
                             memory_limit=None):
         if uuid in self._data['workers']['pending_create']:
@@ -152,33 +152,38 @@ class SupervisorBase(ZmqJsonRpcTask):
             ('memory_limit', memory_limit),
         ])
 
-    def on__request_queue(self, env, multipart_message, uuid):
+    def rpc__request_queue(self, env, multipart_message, uuid):
         requests = self._data['worker_states'][uuid]._request_queue
         self._data['worker_states'][uuid]._request_queue = []
         return requests
 
-    def on__request_task(self, env, multipart_message, worker_uuid):
-        z = ZmqJsonRpcProxy(self._uris['manager_rpc'], uuid=worker_uuid)
+    def rpc__request_task(self, env, multipart_message, worker_uuid):
+        z = ZmqRpcProxy(self._uris['manager_rpc'], uuid=worker_uuid)
         result = z.request_task(self._data['worker_infos'][worker_uuid])
         return result
+
+    def rpc__debug_request(self, env, multipart_message, worker_uuid):
+        import pudb; pudb.set_trace()
+        print 'pudb done'
 
     def create_worker(self, env, worker_uuid, *args, **kwargs):
         raise NotImplementedError
 
-    def get_handler(self, command):
+    def get_handler(self, command, prefix=None):
         '''
         Check to see if a handler exists for a given command.  If the command
         is not found in the dictionary of handler methods, refresh the
         dictionary to be sure the handler is still not available.
         '''
-        if not command in self._handler_methods:
+        print self._handler_methods.keys()
+        if not command in self._handler_methods['rpc__']:
             if command in self._remote_handlers:
                 def _do_command(env, multipart_message, uuid, *args, **kwargs):
-                    z = ZmqJsonRpcProxy(self._uris['manager_rpc'], uuid=uuid)
+                    z = ZmqRpcProxy(self._uris['manager_rpc'], uuid=uuid)
                     return getattr(z, command)(*args, **kwargs)
                 return _do_command
             self.refresh_handler_methods()
-        return self._handler_methods.get(command)
+        return self._handler_methods['rpc__'].get(command)
 
     def call_handler(self, handler, env, multipart_message, request):
         '''
@@ -257,7 +262,7 @@ class SupervisorBase(ZmqJsonRpcTask):
         `terminate_worker(self, env, uuid)` accordingly.
         '''
         def get_z():
-            return ZmqJsonRpcProxy(self._uris['manager_rpc'], uuid=worker_uuid)
+            return ZmqRpcProxy(self._uris['manager_rpc'], uuid=worker_uuid)
 
         z = None
 
@@ -317,7 +322,7 @@ class SupervisorBase(ZmqJsonRpcTask):
                     'worker %s has revived - heartbeat_count=%s'
                     % (uuid, worker._heartbeat_count)
                 )
-                z = ZmqJsonRpcProxy(self._uris['manager_rpc'], uuid=uuid)
+                z = ZmqRpcProxy(self._uris['manager_rpc'], uuid=uuid)
                 z.revived_worker()
 
     def unpack_request(self, multipart_message):

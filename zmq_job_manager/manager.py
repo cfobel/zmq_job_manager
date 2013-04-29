@@ -205,7 +205,7 @@ def parse_args():
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.WARNING)
     args = parse_args()
     m = Manager(args.pub_uri, args.rep_uri)
     m.run()

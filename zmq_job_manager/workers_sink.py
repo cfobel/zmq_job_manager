@@ -1,6 +1,7 @@
 import logging
 from collections import OrderedDict
 from datetime import datetime
+import time
 try:
     import cPickle as pickle
 except ImportError:
@@ -100,6 +101,8 @@ class WorkersSink(ZmqRpcTask):
                 return node
             except:
                 self._reset_db()
+                time.sleep(0.1)
+                return self._get_db_node(db_path)
         raise
 
     def _save_to_db(self, db_path, value):
@@ -112,6 +115,8 @@ class WorkersSink(ZmqRpcTask):
                 return node
             except:
                 self._reset_db()
+                time.sleep(0.1)
+                return self._save_to_db(db_path, value)
         raise
 
     def get_uris(self):

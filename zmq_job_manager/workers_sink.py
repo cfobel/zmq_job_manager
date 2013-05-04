@@ -184,17 +184,17 @@ class WorkersSink(ZmqRpcTask):
             # Since we are referencing the same data item multiple times,
             # if we do not conduct a `pack` of the database, the file size will
             # grow according to a multiple of the database size.
-            self._db.pack()
+            #self._db.pack()
         if 'datetime_by_task_uuid' not in self._root\
                 or task_uuid not in self._root['datetime_by_task_uuid']:
             db_path = '/datetime_by_task_uuid/%s' % task_uuid
             now = datetime.now()
             self._save_to_db(db_path, now)
-            self._db.pack()
+            #self._db.pack()
             task_uuid_by_datetime = self._root.setdefault('task_uuid_by_datetime', OOBTree())
             task_uuid_by_datetime[now] = task_uuid
             transaction.commit()
-            self._db.pack()
+            #self._db.pack()
         logging.getLogger(log_label(self)).info(self._root.keys())
 
     def sub__store(self, message, serialization, key, value):

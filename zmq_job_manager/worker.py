@@ -17,10 +17,12 @@ except ImportError:
 import psutil
 import netifaces
 import eventlet
+import zmq
 from zmq.utils import jsonapi
+from zmq.eventloop import zmqstream
 from zmq.eventloop.ioloop import IOLoop, PeriodicCallback
 from zmq_helpers.rpc import ZmqRpcProxy, RpcHandlerMixin
-from zmq_helpers.utils import log_label
+from zmq_helpers.utils import log_label, unique_ipc_uri, cleanup_ipc_uris
 from cpu_info.cpu_info import cpu_info, cpu_summary
 
 from .manager import get_seconds_since_epoch
@@ -61,6 +63,7 @@ def worker_info():
                                     for i in interfaces])),
     ])
     return d
+
 
 
 class Worker(RpcHandlerMixin):
@@ -156,8 +159,22 @@ class Worker(RpcHandlerMixin):
                         serialization=SERIALIZE__JSON)
         self.rpc__terminate(io_loop, supervisor)
 
+    def on_recv(self, supervisor, multipart_message):
+        command = multipart_message[0]
+        args, kwargs = map(pickle.loads, multipart_message[1:])
+        try:
+            getattr(supervisor, command)(*args, **kwargs)
+        except Exception:
+            import traceback
+            logging.getLogger(log_label(self)).error(traceback.format_exc())
+
     def run(self):
         supervisor = ZmqRpcProxy(self.uris['supervisor'], uuid=self.uuid)
+        ctx = zmq.Context()
+        socket_pull = zmq.Socket(ctx, zmq.PULL)
+        self.uris['pull'] = unique_ipc_uri()
+        print 'uris:', self.uris.items()
+        socket_pull.bind(self.uris['pull'])
         self.start_time = datetime.now()
         print self.config
         if self.config['time_limit']:
@@ -169,6 +186,8 @@ class Worker(RpcHandlerMixin):
         supervisor.register_worker(worker_info())
 
         io_loop = IOLoop()
+        stream_pull = zmqstream.ZMQStream(socket_pull, io_loop)
+        stream_pull.on_recv(functools.partial(self.on_recv, supervisor))
         parent, child = Pipe()
         self._task_thread = None
         self._task_uuid = None
@@ -202,6 +221,7 @@ class Worker(RpcHandlerMixin):
             io_loop.start()
         except KeyboardInterrupt:
             pass
+        cleanup_ipc_uris([self.uris['pull']])
 
     def start_task(self, supervisor, task_uuid, task):
         # Run a task in a subprocess, forwarding any `stdout` or `stderr`
@@ -213,7 +233,9 @@ class Worker(RpcHandlerMixin):
         self._env.update({'ZMQ_JOB_MANAGER__SUPERVISOR_URI':
                                 self.uris['supervisor'],
                           'ZMQ_JOB_MANAGER__WORKER_UUID': self.uuid,
-                          'ZMQ_JOB_MANAGER__TASK_UUID': task_uuid})
+                          'ZMQ_JOB_MANAGER__TASK_UUID': task_uuid,
+                          'ZMQ_JOB_MANAGER__WORKER_URI': self.uris['pull'],
+                          })
 
         p = task.make(popen_class=ProxyPopen, env=self._env)
         task_thread = Thread(target=p.communicate, args=(supervisor, ))

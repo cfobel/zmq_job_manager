@@ -103,43 +103,57 @@ class Worker(RpcHandlerMixin):
             if handler:
                 handler(io_loop, supervisor, *args, **kwargs)
 
+    def _finalize_task(self)
+        self._complete_task(supervisor, self._task_uuid, self._task)
+        self._task_thread.join()
+        self._reset_task_request_state()
+
+    def _reset_task_request_state(self):
+        del self._task_thread
+        del self._deferred
+        del self._task
+
+        self._task_thread = None
+        self._task_uuid = None
+        self._task = None
+        self._deferred = None
+
     def timer__task_monitor(self, io_loop, supervisor):
-        '''
-        If the subprocess has finished,
-        gracefully.
-        '''
         if self._task_thread is not None:
-            logging.getLogger(log_label(self)).debug('self._task_thread %s', self._task_thread)
+            logging.getLogger(log_label(self)).debug('self._task_thread %s',
+                                                     self._task_thread)
             if not self._task_thread.isAlive():
-                self._complete_task(supervisor, self._task_uuid, self._task)
-                self._task_thread.join()
-                del self._task_thread
-                self._task_thread = None
-                self._task_uuid = None
-                self._task = None
-                self._deferred = None
+                # The task thread has completed, so perform finalization.
+                self._finalize_task()
             else:
+                # The task thread is still running, so try to join, but timeout
+                # if the task thread is still not ready.
                 self._task_thread.join(0.01)
         elif self._deferred is None:
-            logging.getLogger(log_label(self)).debug('self._deferred %s', self._deferred)
+            # There is no task thread currently running, so begin an
+            # asynchronous request for a task from the supervisor.  Note that
+            # `request_task.spawn()` is used to make the call asynchronous.
+            logging.getLogger(log_label(self)).debug('self._deferred %s',
+                                                     self._deferred)
             self._deferred = supervisor.request_task.spawn()
         elif self._deferred.ready():
+            # The response from a previous asynchronous task request from the
+            # supervisor is ready.
             result = pickle.loads(str(self._deferred.wait()))
             if result:
-                logging.getLogger(log_label(self)).info('self._deferred is ready: %s', result)
+                # The supervisor provided a task to run.
+                logging.getLogger(log_label(self)).info('self._deferred is '
+                                                        'ready: %s', result)
                 task_uuid, task = result
                 self._task_thread = self.start_task(supervisor, task_uuid,
                                                     task)
                 self._task_uuid = task_uuid
                 self._task = task
             else:
-                del self._deferred
-                del self._task
-
-                self._task_thread = None
-                self._task_uuid = None
-                self._task = None
-                self._deferred = None
+                # The supervisor did not have any task to run, so reset the
+                # task request state, preparing to send a new request on the
+                # next task monitor timer callback.
+                self._reset_task_request_state()
         else:
             eventlet.sleep(0.1)
 
@@ -159,7 +173,7 @@ class Worker(RpcHandlerMixin):
                         serialization=SERIALIZE__JSON)
         self.rpc__terminate(io_loop, supervisor)
 
-    def on_recv(self, supervisor, multipart_message):
+    def pull__message_received(self, supervisor, multipart_message):
         command = multipart_message[0]
         args, kwargs = map(pickle.loads, multipart_message[1:])
         try:
@@ -178,7 +192,8 @@ class Worker(RpcHandlerMixin):
         self.start_time = datetime.now()
         print self.config
         if self.config['time_limit']:
-            delta = max(timedelta(), self.config['time_limit'] - timedelta(minutes=5))
+            delta = max(timedelta(), self.config['time_limit'] -
+                        timedelta(minutes=5))
             self.end_time = self.start_time + delta
         # Notify supervisor that we're alive and send our configuration
         # information.  This `worker_info` currently contains information
@@ -187,7 +202,8 @@ class Worker(RpcHandlerMixin):
 
         io_loop = IOLoop()
         stream_pull = zmqstream.ZMQStream(socket_pull, io_loop)
-        stream_pull.on_recv(functools.partial(self.on_recv, supervisor))
+        stream_pull.on_recv(functools.partial(self.pull__message_received,
+                                              supervisor))
         parent, child = Pipe()
         self._task_thread = None
         self._task_uuid = None
@@ -195,12 +211,23 @@ class Worker(RpcHandlerMixin):
         self._deferred = None
 
         callbacks = OrderedDict()
+
+        # Periodically send a heartbeat signal to let the supervisor know we're
+        # still running.
         callbacks['heartbeat'] = PeriodicCallback(
             functools.partial(self.timer__heartbeat, io_loop, supervisor), 4000,
             io_loop=io_loop)
+
+        # Periodically check and update task state.  When no task is running,
+        # this means requesting a new task from the supervisor.  When a task is
+        # running, wait until the task finishes, then finalize the task and
+        # prepare to request a new task from the supervisor.
         callbacks['task_monitor'] = PeriodicCallback(
             functools.partial(self.timer__task_monitor, io_loop, supervisor),
             2000, io_loop=io_loop)
+
+        # Periodically check with the supervisor to see if there are any
+        # outstanding worker commands queued, processing any queued commands.
         callbacks['queue_monitor'] = PeriodicCallback(
             functools.partial(self.timer__queue_monitor, io_loop, supervisor),
             2000, io_loop=io_loop)

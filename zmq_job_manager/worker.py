@@ -65,6 +65,103 @@ def worker_info():
     return d
 
 
+class TaskMonitor(object):
+    def __init__(self, worker, supervisor):
+        self.worker = worker
+        self.supervisor = supervisor
+        self._task = None
+        self._thread = None
+        self._uuid = None
+        self._deferred = None
+
+    def update_state(self):
+        if self._thread is not None:
+            logging.getLogger(log_label(self)).debug('self._thread %s',
+                                                     self._thread)
+            if not self._thread.isAlive():
+                # The task thread has completed, so perform finalization.
+                self._finalize()
+            else:
+                # The task thread is still running, so try to join, but timeout
+                # if the task thread is still not ready.
+                self._thread.join(0.01)
+        elif self._deferred is None:
+            # There is no task thread currently running, so begin an
+            # asynchronous request for a task from the supervisor.  Note that
+            # `request_task.spawn()` is used to make the call asynchronous.
+            logging.getLogger(log_label(self)).debug('self._deferred %s',
+                                                     self._deferred)
+            self._deferred = self.supervisor.request_task.spawn()
+        elif self._deferred.ready():
+            # The response from a previous asynchronous task request from the
+            # supervisor is ready.
+            result = pickle.loads(str(self._deferred.wait()))
+            if result:
+                # The supervisor provided a task to run.
+                logging.getLogger(log_label(self)).info('self._deferred is '
+                                                        'ready: %s', result)
+                task_uuid, task = result
+                self._task = task
+                self._uuid = task_uuid
+                self._thread = self.start()
+            else:
+                # The supervisor did not have any task to run, so reset the
+                # task request state, preparing to send a new request on the
+                # next task monitor timer callback.
+                self._reset()
+        else:
+            eventlet.sleep(0.1)
+
+    def start(self):
+        # Run a task in a subprocess, forwarding any `stdout` or `stderr`
+        # output to supervisor.
+        logging.getLogger(log_label(self)).info(self._uuid)
+        # Run an IO-loop here, to allow useful work while the subprocess is
+        # run in the background thread, `t`.
+        self._env = os.environ.copy()
+        self._env.update({'ZMQ_JOB_MANAGER__SUPERVISOR_URI':
+                                self.uris['supervisor'],
+                          'ZMQ_JOB_MANAGER__WORKER_UUID': self.worker.uuid,
+                          'ZMQ_JOB_MANAGER__TASK_UUID': self._uuid,
+                          'ZMQ_JOB_MANAGER__WORKER_URI': self.uris['pull'],
+                          })
+
+        p = self._task.make(popen_class=ProxyPopen, env=self._env)
+        task_thread = Thread(target=p.communicate, args=(self.supervisor, ))
+        task_thread.daemon = True
+        task_thread.start()
+        self._begin()
+        return task_thread
+
+    def _begin(self):
+        self.supervisor.store('__task__', pickle.dumps(self._task),
+                        serialization=SERIALIZE__PICKLE)
+        self.supervisor.store('__env__', pickle.dumps(self._env),
+                        serialization=SERIALIZE__PICKLE)
+        self.supervisor.begin_task(self._uuid)
+
+    def _finalize(self):
+        self._complete()
+        self._thread.join()
+        self._reset()
+
+    def _complete(self):
+        self.supervisor.store('done', pickle.dumps(datetime.now()),
+                        serialization=SERIALIZE__PICKLE)
+        self.supervisor.complete_task(self._uuid)
+
+    def handle_sigterm(self):
+        if self._thread is not None:
+            self.supervisor.store('__sigterm_caught__',
+                        jsonapi.dumps(get_seconds_since_epoch()),
+                        serialization=SERIALIZE__JSON)
+
+    def _reset(self):
+        for name in ('_thread', '_deferred', '_task', '_uuid'):
+            if hasattr(self, name):
+                delattr(self, name)
+            setattr(self, name, None)
+
 
 class Worker(RpcHandlerMixin):
     def __init__(self, supervisor_uri, uuid=None, labels=tuple(),
@@ -77,6 +174,7 @@ class Worker(RpcHandlerMixin):
         self.config = dict(labels=labels, time_limit=time_limit,
                            memory_limit=memory_limit, n_procs=n_procs,
                            n_threads=n_threads)
+        self._task_monitor = None
 
         self.start_time = None
         self.end_time = None
@@ -103,59 +201,8 @@ class Worker(RpcHandlerMixin):
             if handler:
                 handler(io_loop, supervisor, *args, **kwargs)
 
-    def _finalize_task(self)
-        self._complete_task(supervisor, self._task_uuid, self._task)
-        self._task_thread.join()
-        self._reset_task_request_state()
-
-    def _reset_task_request_state(self):
-        del self._task_thread
-        del self._deferred
-        del self._task
-
-        self._task_thread = None
-        self._task_uuid = None
-        self._task = None
-        self._deferred = None
-
     def timer__task_monitor(self, io_loop, supervisor):
-        if self._task_thread is not None:
-            logging.getLogger(log_label(self)).debug('self._task_thread %s',
-                                                     self._task_thread)
-            if not self._task_thread.isAlive():
-                # The task thread has completed, so perform finalization.
-                self._finalize_task()
-            else:
-                # The task thread is still running, so try to join, but timeout
-                # if the task thread is still not ready.
-                self._task_thread.join(0.01)
-        elif self._deferred is None:
-            # There is no task thread currently running, so begin an
-            # asynchronous request for a task from the supervisor.  Note that
-            # `request_task.spawn()` is used to make the call asynchronous.
-            logging.getLogger(log_label(self)).debug('self._deferred %s',
-                                                     self._deferred)
-            self._deferred = supervisor.request_task.spawn()
-        elif self._deferred.ready():
-            # The response from a previous asynchronous task request from the
-            # supervisor is ready.
-            result = pickle.loads(str(self._deferred.wait()))
-            if result:
-                # The supervisor provided a task to run.
-                logging.getLogger(log_label(self)).info('self._deferred is '
-                                                        'ready: %s', result)
-                task_uuid, task = result
-                self._task_thread = self.start_task(supervisor, task_uuid,
-                                                    task)
-                self._task_uuid = task_uuid
-                self._task = task
-            else:
-                # The supervisor did not have any task to run, so reset the
-                # task request state, preparing to send a new request on the
-                # next task monitor timer callback.
-                self._reset_task_request_state()
-        else:
-            eventlet.sleep(0.1)
+        self._task_monitor.update_state()
 
     def timer__heartbeat(self, io_loop, supervisor):
         '''
@@ -167,10 +214,7 @@ class Worker(RpcHandlerMixin):
 
     def handle_sigterm(self, io_loop, supervisor, *args, **kwargs):
         logging.getLogger(log_label(self)).info('%s, %s', args, kwargs)
-        if self._task_thread is not None:
-            supervisor.store('__sigterm_caught__',
-                        jsonapi.dumps(get_seconds_since_epoch()),
-                        serialization=SERIALIZE__JSON)
+        self._task_monitor.handle_sigterm()
         self.rpc__terminate(io_loop, supervisor)
 
     def pull__message_received(self, supervisor, multipart_message):
@@ -184,6 +228,8 @@ class Worker(RpcHandlerMixin):
 
     def run(self):
         supervisor = ZmqRpcProxy(self.uris['supervisor'], uuid=self.uuid)
+        self._task_monitor = TaskMonitor(self, supervisor)
+
         ctx = zmq.Context()
         socket_pull = zmq.Socket(ctx, zmq.PULL)
         self.uris['pull'] = unique_ipc_uri()
@@ -205,10 +251,6 @@ class Worker(RpcHandlerMixin):
         stream_pull.on_recv(functools.partial(self.pull__message_received,
                                               supervisor))
         parent, child = Pipe()
-        self._task_thread = None
-        self._task_uuid = None
-        self._task = None
-        self._deferred = None
 
         callbacks = OrderedDict()
 
@@ -250,38 +292,6 @@ class Worker(RpcHandlerMixin):
             pass
         cleanup_ipc_uris([self.uris['pull']])
 
-    def start_task(self, supervisor, task_uuid, task):
-        # Run a task in a subprocess, forwarding any `stdout` or `stderr`
-        # output to supervisor.
-        logging.getLogger(log_label(self)).info(task_uuid)
-        # Run an IO-loop here, to allow useful work while the subprocess is
-        # run in the background thread, `t`.
-        self._env = os.environ.copy()
-        self._env.update({'ZMQ_JOB_MANAGER__SUPERVISOR_URI':
-                                self.uris['supervisor'],
-                          'ZMQ_JOB_MANAGER__WORKER_UUID': self.uuid,
-                          'ZMQ_JOB_MANAGER__TASK_UUID': task_uuid,
-                          'ZMQ_JOB_MANAGER__WORKER_URI': self.uris['pull'],
-                          })
-
-        p = task.make(popen_class=ProxyPopen, env=self._env)
-        task_thread = Thread(target=p.communicate, args=(supervisor, ))
-        task_thread.daemon = True
-        task_thread.start()
-        self._begin_task(supervisor, task_uuid, task)
-        return task_thread
-
-    def _begin_task(self, supervisor, task_uuid, task):
-        supervisor.store('__task__', pickle.dumps(task),
-                        serialization=SERIALIZE__PICKLE)
-        supervisor.store('__env__', pickle.dumps(self._env),
-                        serialization=SERIALIZE__PICKLE)
-        supervisor.begin_task(task_uuid)
-
-    def _complete_task(self, supervisor, task_uuid, task):
-        supervisor.store('done', pickle.dumps(datetime.now()),
-                        serialization=SERIALIZE__PICKLE)
-        supervisor.complete_task(task_uuid)
 
 
 def parse_args():

@@ -18,6 +18,9 @@ import psutil
 import netifaces
 import eventlet
 import zmq
+from durus.persistent_list import PersistentList
+from durus.persistent_dict import PersistentDict
+from persistent_helpers.storage import DurusStorage
 from zmq.utils import jsonapi
 from zmq.eventloop import zmqstream
 from zmq.eventloop.ioloop import IOLoop, PeriodicCallback
@@ -94,7 +97,10 @@ class TaskMonitor(object):
             # `request_task.spawn()` is used to make the call asynchronous.
             logging.getLogger(log_label(self)).debug('self._deferred %s',
                                                      self._deferred)
-            self._deferred = self.supervisor.request_task.spawn()
+            try:
+                self._deferred = self.supervisor.request_task.spawn()
+            except RuntimeError:
+                logging.getLogger(log_label(self)).error('could not request task')
         elif self._deferred.ready():
             # The response from a previous asynchronous task request from the
             # supervisor is ready.
@@ -123,11 +129,11 @@ class TaskMonitor(object):
         # run in the background thread, `t`.
         self._env = os.environ.copy()
         self._env.update({'ZMQ_JOB_MANAGER__SUPERVISOR_URI':
-                                self.uris['supervisor'],
+                           self.worker.uris['supervisor'],
                           'ZMQ_JOB_MANAGER__WORKER_UUID': self.worker.uuid,
                           'ZMQ_JOB_MANAGER__TASK_UUID': self._uuid,
-                          'ZMQ_JOB_MANAGER__WORKER_URI': self.uris['pull'],
-                          })
+                          'ZMQ_JOB_MANAGER__WORKER_URI':
+                           self.worker.uris['pull'], })
 
         p = self._task.make(popen_class=ProxyPopen, env=self._env)
         task_thread = Thread(target=p.communicate, args=(self.supervisor, ))
@@ -144,6 +150,7 @@ class TaskMonitor(object):
         self.supervisor.begin_task(self._uuid)
 
     def _finalize(self):
+        logging.getLogger(log_label(self)).info(self._uuid)
         self._complete()
         self._thread.join()
         self._reset()
@@ -164,6 +171,76 @@ class TaskMonitor(object):
             if hasattr(self, name):
                 delattr(self, name)
             setattr(self, name, None)
+
+
+class QueueState(object):
+    def __init__(self, deferred):
+        self.deferred = deferred
+        self.submit_timestamp = datetime.now()
+
+    def ready(self):
+        if (datetime.now() - self.submit_timestamp) > timedelta(minutes=5):
+            raise RuntimeError, 'Request timed out'
+        return self.deferred.ready()
+
+    def wait(self):
+        if self.deferred.ready():
+            return self.deferred.wait()
+        raise RuntimeError, 'Deferred is not ready'
+
+
+class CommandQueue(object):
+    def __init__(self, storage, supervisor):
+        self.supervisor = supervisor
+        self.storage = storage
+        self.queue_states = OrderedDict()
+        print 'Using storage: %s' % self.storage.host
+        #self.storage.root['command_queue'] = PersistentDict()
+        #self.storage.commit()
+
+    def push(self, task_uuid, command_tuple):
+        queue = self.storage.root.setdefault(task_uuid, PersistentList())
+        queue.append(command_tuple)
+        self.storage.commit()
+
+    def queue_command(self, task_uuid, command, *args, **kwargs):
+        rpc_method = getattr(self.supervisor, command)
+        self.queue_states[task_uuid] = QueueState(
+                rpc_method.spawn(*args, **kwargs))
+
+    def process_pending(self):
+        for task_uuid, queue in self.storage.root.iteritems():
+            if task_uuid not in self.queue_states and queue:
+                command, args, kwargs = queue[0]
+                self.queue_command(task_uuid, command, *args, **kwargs)
+        eventlet.sleep(0.01)
+        do_pack = False
+        for task_uuid, queue_state in self.queue_states.iteritems():
+            try:
+                if queue_state.ready():
+                    # The deferred request has completed, so clear the queue
+                    # state instance and remove the corresponding command from
+                    # the relevant task's command queue.
+                    result = queue_state.wait()
+                    del self.queue_states[task_uuid]
+                    del self.storage.root[task_uuid][0]
+                    if len(self.storage.root[task_uuid]) <= 0:
+                        # Command queue for current task is empty, so delete it
+                        # (it will be recreated, if required, through the
+                        # `push` method).
+                        del self.storage.root[task_uuid]
+                        do_pack = True
+                        logging.getLogger(log_label(self)).info('pack storage')
+                    self.storage.commit()
+            except RuntimeError:
+                logging.getLogger(log_label(self)).error('')
+                # The deferred request has timed out, so resubmit.
+                command, args, kwargs = self.storage.root[task_uuid][0]
+                self.queue_command(task_uuid, command, *args, **kwargs)
+        self.storage.commit()
+        if do_pack:
+            self.storage.pack()
+        eventlet.sleep(0.01)
 
 
 class Worker(RpcHandlerMixin):
@@ -192,6 +269,12 @@ class Worker(RpcHandlerMixin):
     def rpc__terminate(self, io_loop, supervisor, *args, **kwargs):
         io_loop.stop()
         supervisor.terminate_worker()
+
+    def timer__command_queue_monitor(self, io_loop, supervisor):
+        '''
+        Process any pending task commands.
+        '''
+        self.command_queue.process_pending()
 
     def timer__queue_monitor(self, io_loop, supervisor):
         '''
@@ -223,14 +306,19 @@ class Worker(RpcHandlerMixin):
     def pull__message_received(self, supervisor, multipart_message):
         command = multipart_message[0]
         args, kwargs = map(pickle.loads, multipart_message[1:])
-        try:
-            getattr(supervisor, command)(*args, **kwargs)
-        except Exception:
-            import traceback
-            logging.getLogger(log_label(self)).error(traceback.format_exc())
+        if self._task_monitor and self._task_monitor._uuid:
+            self.command_queue.push(self._task_monitor._uuid, (command, args,
+                                                               kwargs))
+
+    def task_completed(self, task_uuid):
+        logging.getLogger(log_label(self)).info('pack storage')
+        self.storage.pack()
 
     def run(self):
+        #import pudb; pudb.set_trace()
         supervisor = ZmqRpcProxy(self.uris['supervisor'], uuid=self.uuid)
+        self.storage = DurusStorage(host='%s.durus.dat' % self.uuid, port=False)
+        self.command_queue = CommandQueue(self.storage, supervisor)
         self._task_monitor = TaskMonitor(self, supervisor)
 
         ctx = zmq.Context()
@@ -244,6 +332,7 @@ class Worker(RpcHandlerMixin):
             delta = max(timedelta(), self.config['time_limit'] -
                         timedelta(minutes=5))
             self.end_time = self.start_time + delta
+
         # Notify supervisor that we're alive and send our configuration
         # information.  This `worker_info` currently contains information
         # regarding the CPU and the network interfaces.
@@ -271,6 +360,11 @@ class Worker(RpcHandlerMixin):
             functools.partial(self.timer__task_monitor, io_loop, supervisor),
             2000, io_loop=io_loop)
 
+        # Periodically check for
+        callbacks['command_queue_monitor'] = PeriodicCallback(
+            functools.partial(self.timer__command_queue_monitor, io_loop,
+                              supervisor), 10, io_loop=io_loop)
+
         # Periodically check with the supervisor to see if there are any
         # outstanding worker commands queued, processing any queued commands.
         callbacks['queue_monitor'] = PeriodicCallback(
@@ -294,7 +388,6 @@ class Worker(RpcHandlerMixin):
         except KeyboardInterrupt:
             pass
         cleanup_ipc_uris([self.uris['pull']])
-
 
 
 def parse_args():

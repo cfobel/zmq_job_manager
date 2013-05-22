@@ -3,6 +3,7 @@ try:
 except ImportError:
     import pickle
 
+import os
 import zmq
 
 
@@ -19,8 +20,9 @@ class WorkerStorage(object):
         self.push.connect(worker_uri)
 
     def store(self, key, value, **kwargs):
+        kwargs['task_uuid'] = os.environ['ZMQ_JOB_MANAGER__TASK_UUID']
         data = map(pickle.dumps, [(key, value), kwargs])
-        self.push.send_multipart(['store'] + data)
+        self.push.send_multipart([kwargs['task_uuid'], 'store'] + data)
 
     def cleanup(self):
         self.push.close()

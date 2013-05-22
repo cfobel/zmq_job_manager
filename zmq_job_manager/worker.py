@@ -1,3 +1,6 @@
+import sys
+import traceback
+import threading
 import signal
 import functools
 from multiprocessing import Pipe
@@ -98,6 +101,7 @@ class TaskMonitor(object):
             logging.getLogger(log_label(self)).debug('self._deferred %s',
                                                      self._deferred)
             try:
+                self.supervisor.register_worker(worker_info())
                 self._deferred = self.supervisor.request_task.spawn()
             except RuntimeError:
                 logging.getLogger(log_label(self)).error('could not request task')
@@ -106,9 +110,10 @@ class TaskMonitor(object):
             # supervisor is ready.
             result = pickle.loads(str(self._deferred.wait()))
             if result:
+                uuid, p = result
                 # The supervisor provided a task to run.
                 logging.getLogger(log_label(self)).info('self._deferred is '
-                                                        'ready: %s', result)
+                                                        'ready: %s', (uuid, p._args))
                 task_uuid, task = result
                 self._task = task
                 self._uuid = task_uuid
@@ -142,12 +147,19 @@ class TaskMonitor(object):
         self._begin()
         return task_thread
 
+    def _store(self, key, value, **kwargs):
+        self.worker.command_queue.push(self._uuid, ('store', (key, value),
+                                                    {'task_uuid': self._uuid}))
+
     def _begin(self):
-        self.supervisor.store('__task__', pickle.dumps(self._task),
-                        serialization=SERIALIZE__PICKLE)
-        self.supervisor.store('__env__', pickle.dumps(self._env),
-                        serialization=SERIALIZE__PICKLE)
-        self.supervisor.begin_task(self._uuid)
+        self._store('__task__', pickle.dumps(self._task),
+                    serialization=SERIALIZE__PICKLE)
+        self._store('__env__', pickle.dumps(self._env),
+                    serialization=SERIALIZE__PICKLE)
+        args = (self._uuid, )
+        kwargs = {}
+        self.worker.command_queue.push(self._uuid, ('begin_task', args,
+                                                    kwargs))
 
     def _finalize(self):
         logging.getLogger(log_label(self)).info(self._uuid)
@@ -156,11 +168,15 @@ class TaskMonitor(object):
         self._reset()
 
     def _complete(self):
-        self.supervisor.store('done', pickle.dumps(datetime.now()),
-                        serialization=SERIALIZE__PICKLE)
-        self.supervisor.complete_task(self._uuid)
+        self._store('done', pickle.dumps(datetime.now()),
+                    serialization=SERIALIZE__PICKLE)
+        args = (self._uuid, )
+        kwargs = {}
+        self.worker.command_queue.push(self._uuid, ('complete_task', args,
+                                                    kwargs))
 
     def handle_sigterm(self):
+        #import pudb; pudb.set_trace()
         if self._thread is not None:
             self.supervisor.store('__sigterm_caught__',
                         jsonapi.dumps(get_seconds_since_epoch()),
@@ -194,7 +210,7 @@ class CommandQueue(object):
         self.supervisor = supervisor
         self.storage = storage
         self.queue_states = OrderedDict()
-        print 'Using storage: %s' % self.storage.host
+        #print 'Using storage: %s' % self.storage.host
         #self.storage.root['command_queue'] = PersistentDict()
         #self.storage.commit()
 
@@ -202,15 +218,18 @@ class CommandQueue(object):
         queue = self.storage.root.setdefault(task_uuid, PersistentList())
         queue.append(command_tuple)
         self.storage.commit()
+        command, args, kwargs = command_tuple
+        logging.getLogger(log_label(self)).info('[%s] %s', command, args[0])
 
-    def queue_command(self, task_uuid, command, *args, **kwargs):
+    def queue_command(self, _task_uuid, command, *args, **kwargs):
         rpc_method = getattr(self.supervisor, command)
-        self.queue_states[task_uuid] = QueueState(
+        logging.getLogger(log_label(self)).info('[%s] %s', command, args[0])
+        self.queue_states[_task_uuid] = QueueState(
                 rpc_method.spawn(*args, **kwargs))
 
     def process_pending(self):
         for task_uuid, queue in self.storage.root.iteritems():
-            if task_uuid not in self.queue_states and queue:
+            if task_uuid not in self.queue_states and len(queue) > 0:
                 command, args, kwargs = queue[0]
                 self.queue_command(task_uuid, command, *args, **kwargs)
         eventlet.sleep(0.01)
@@ -223,14 +242,14 @@ class CommandQueue(object):
                     # the relevant task's command queue.
                     result = queue_state.wait()
                     del self.queue_states[task_uuid]
-                    del self.storage.root[task_uuid][0]
-                    if len(self.storage.root[task_uuid]) <= 0:
-                        # Command queue for current task is empty, so delete it
-                        # (it will be recreated, if required, through the
-                        # `push` method).
-                        del self.storage.root[task_uuid]
-                        do_pack = True
-                        logging.getLogger(log_label(self)).info('pack storage')
+                    if task_uuid in self.storage.root:
+                        del self.storage.root[task_uuid][0]
+                        if len(self.storage.root[task_uuid]) <= 0:
+                            # Command queue for current task is empty, so delete it
+                            # (it will be recreated, if required, through the
+                            # `push` method).
+                            del self.storage.root[task_uuid]
+                            do_pack = True
                     self.storage.commit()
             except RuntimeError:
                 logging.getLogger(log_label(self)).error('')
@@ -239,6 +258,7 @@ class CommandQueue(object):
                 self.queue_command(task_uuid, command, *args, **kwargs)
         self.storage.commit()
         if do_pack:
+            logging.getLogger(log_label(self)).info('pack storage')
             self.storage.pack()
         eventlet.sleep(0.01)
 
@@ -267,6 +287,7 @@ class Worker(RpcHandlerMixin):
         self.refresh_handler_methods()
 
     def rpc__terminate(self, io_loop, supervisor, *args, **kwargs):
+        #import pudb; pudb.set_trace()
         io_loop.stop()
         supervisor.terminate_worker()
 
@@ -274,18 +295,37 @@ class Worker(RpcHandlerMixin):
         '''
         Process any pending task commands.
         '''
+        logging.getLogger(log_label(self)).info('')
         self.command_queue.process_pending()
 
     def timer__queue_monitor(self, io_loop, supervisor):
         '''
         Process any pending requests in our queue.
         '''
-        requests = supervisor.request_queue()
-        for command, args, kwargs in requests:
-            logging.getLogger(log_label(self)).info(command)
-            handler = self.get_handler(command)
-            if handler:
-                handler(io_loop, supervisor, *args, **kwargs)
+        logging.getLogger(log_label(self)).info('')
+        try:
+            deferred = supervisor.request_queue.spawn(_d_none_on_error=True)
+        except RuntimeError:
+            # Notify supervisor that we're alive and send our configuration
+            # information.  This `worker_info` currently contains information
+            # regarding the CPU and the network interfaces.
+            supervisor.register_worker(worker_info())
+            deferred = supervisor.request_queue.spawn(_d_none_on_error=True)
+        eventlet.sleep(0.01)
+        for i in range(10):
+            if deferred.ready():
+                requests = deferred.wait()
+                logging.getLogger(log_label(self)).info('got request response: %s', requests)
+                if requests is not None:
+                    supervisor.register_worker(worker_info())
+                    for command, args, kwargs in requests:
+                        logging.getLogger(log_label(self)).info(command)
+                        handler = self.get_handler(command)
+                        if handler:
+                            handler(io_loop, supervisor, *args, **kwargs)
+                break
+            else:
+                eventlet.sleep(0.01)
 
     def timer__task_monitor(self, io_loop, supervisor):
         self._task_monitor.update_state()
@@ -295,8 +335,9 @@ class Worker(RpcHandlerMixin):
         Send a heartbeat request to the supervisor to notify that we are
         still alive.
         '''
-        logging.getLogger(log_label(self)).debug('')
-        supervisor.heartbeat()
+        logging.getLogger(log_label(self)).info('')
+        supervisor.heartbeat.spawn()
+        eventlet.sleep(0.01)
 
     def handle_sigterm(self, io_loop, supervisor, *args, **kwargs):
         logging.getLogger(log_label(self)).info('%s, %s', args, kwargs)
@@ -304,11 +345,11 @@ class Worker(RpcHandlerMixin):
         self.rpc__terminate(io_loop, supervisor)
 
     def pull__message_received(self, supervisor, multipart_message):
-        command = multipart_message[0]
-        args, kwargs = map(pickle.loads, multipart_message[1:])
-        if self._task_monitor and self._task_monitor._uuid:
-            self.command_queue.push(self._task_monitor._uuid, (command, args,
-                                                               kwargs))
+        task_uuid, command = multipart_message[:2]
+        args, kwargs = map(pickle.loads, multipart_message[2:])
+        if command == 'store':
+            logging.getLogger(log_label(self)).info('store: %s', args[0])
+        self.command_queue.push(task_uuid, (command, args, kwargs))
 
     def task_completed(self, task_uuid):
         logging.getLogger(log_label(self)).info('pack storage')
@@ -324,10 +365,10 @@ class Worker(RpcHandlerMixin):
         ctx = zmq.Context()
         socket_pull = zmq.Socket(ctx, zmq.PULL)
         self.uris['pull'] = unique_ipc_uri()
-        print 'uris:', self.uris.items()
+        #print 'uris:', self.uris.items()
         socket_pull.bind(self.uris['pull'])
         self.start_time = datetime.now()
-        print self.config
+        #print self.config
         if self.config['time_limit']:
             delta = max(timedelta(), self.config['time_limit'] -
                         timedelta(minutes=5))
@@ -371,6 +412,9 @@ class Worker(RpcHandlerMixin):
             functools.partial(self.timer__queue_monitor, io_loop, supervisor),
             2000, io_loop=io_loop)
 
+        callbacks['event_sleep'] = PeriodicCallback(
+            lambda: eventlet.sleep(0.001), 10, io_loop=io_loop)
+
         def _on_run():
             logging.getLogger(log_label()).info('')
             for c in callbacks.values():
@@ -388,6 +432,14 @@ class Worker(RpcHandlerMixin):
         except KeyboardInterrupt:
             pass
         cleanup_ipc_uris([self.uris['pull']])
+        logging.getLogger(log_label(self)).info('cleaned up IPC uris')
+        del self._task_monitor
+        logging.getLogger(log_label(self)).info('threads: %s', threading.enumerate())
+        io_loop.stop()
+        del io_loop
+        self.storage.connection.storage.close()
+        del self.storage.connection
+        del self.storage
 
         # The durus imports (see top of file) cause the worker process to hang.
         # For now, raise a `SystemError` exception to force termination.
@@ -423,6 +475,7 @@ if __name__ == '__main__':
             root.removeHandler(handler)
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s-%(name)s-%(levelname)s:%(message)s")
+    logging.info('test log')
     args = parse_args()
     w = Worker(args.supervisor_uri, uuid=args.worker_uuid,
                time_limit=args.time_limit,

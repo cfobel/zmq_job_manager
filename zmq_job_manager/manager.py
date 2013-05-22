@@ -178,6 +178,8 @@ class Manager(ZmqRpcTask):
                 seconds_since_epoch = get_seconds_since_epoch()
             self.publish(env, uuid, task_uuid, 'complete_task',
                          '%.6f' % seconds_since_epoch)
+        else:
+            logging.getLogger(log_label(self)).info('task %s is not running', task_uuid)
 
     def rpc__register_task(self, env, uuid, shell_command):
         task_uuid = str(uuid4())

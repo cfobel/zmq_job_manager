@@ -18,8 +18,11 @@ import psutil
 import netifaces
 import eventlet
 import zmq
+# The following durus imports cause the worker process to hang
+# (see #4, https://github.com/cfobel/zmq_job_manager/issues/4)
+# For now, the worker process throws a `SystemError` exception when terminating
+# to force termination.
 from durus.persistent_list import PersistentList
-from durus.persistent_dict import PersistentDict
 from persistent_helpers.storage import DurusStorage
 from zmq.utils import jsonapi
 from zmq.eventloop import zmqstream
@@ -27,9 +30,6 @@ from zmq.eventloop.ioloop import IOLoop, PeriodicCallback
 from zmq_helpers.rpc import ZmqRpcProxy, RpcHandlerMixin
 from zmq_helpers.utils import log_label, unique_ipc_uri, cleanup_ipc_uris
 from cpu_info.cpu_info import cpu_info, cpu_summary
-# The following import causes the worker process to hang
-# (see #4, https://github.com/cfobel/zmq_job_manager/issues/4)
-from durus.persistent_list import PersistentList
 
 from .manager import get_seconds_since_epoch
 from .process import PopenPipeReactor
@@ -388,6 +388,11 @@ class Worker(RpcHandlerMixin):
         except KeyboardInterrupt:
             pass
         cleanup_ipc_uris([self.uris['pull']])
+
+        # The durus imports (see top of file) cause the worker process to hang.
+        # For now, raise a `SystemError` exception to force termination.
+        raise SystemError, ('Forcing process to exit because of: '
+                'https://github.com/cfobel/zmq_job_manager/issues/4')
 
 
 def parse_args():

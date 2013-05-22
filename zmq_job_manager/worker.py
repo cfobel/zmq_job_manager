@@ -24,6 +24,9 @@ from zmq.eventloop.ioloop import IOLoop, PeriodicCallback
 from zmq_helpers.rpc import ZmqRpcProxy, RpcHandlerMixin
 from zmq_helpers.utils import log_label, unique_ipc_uri, cleanup_ipc_uris
 from cpu_info.cpu_info import cpu_info, cpu_summary
+# The following import causes the worker process to hang
+# (see #4, https://github.com/cfobel/zmq_job_manager/issues/4)
+from durus.persistent_list import PersistentList
 
 from .manager import get_seconds_since_epoch
 from .process import PopenPipeReactor

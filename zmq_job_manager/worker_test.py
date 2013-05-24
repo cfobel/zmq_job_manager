@@ -66,6 +66,11 @@ class WorkerTest(ZmqRpcTask):
             elif self.deferred_queue.ready():
                 result = self.deferred_queue.wait()
                 print result
+            elif (self.deferred_queue._deferred_start and (datetime.now() -
+                  self.deferred_queue._deferred_start).total_seconds() > 20):
+                # Timeout after no RPC response
+                logging.getLogger(log_label(self)).info('Timeout after no RPC response')
+                self.deferred_queue.abort()
 
     def handle_sigterm(self, io_loop):
         io_loop.stop()

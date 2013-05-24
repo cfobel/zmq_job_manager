@@ -1,3 +1,4 @@
+from datetime import datetime
 from collections import OrderedDict
 from uuid import uuid4
 
@@ -17,7 +18,7 @@ class DeferredZmqRpcQueue(object):
         if queue_storage is None:
             queue_storage = []
         self.request_queue = queue_storage
-        self._deferred_request = None
+        self.abort()
 
     def queue_request(self, command, *args, **kwargs):
         '''
@@ -66,6 +67,7 @@ class DeferredZmqRpcQueue(object):
         command, args, kwargs = self.request_queue[0]
         f = getattr(self.proxy, command)
         self._deferred_request = f.spawn(*args, **kwargs)
+        self._deferred_start = datetime.now()
         return True
 
     def __iter__(self):
@@ -104,6 +106,11 @@ class DeferredZmqRpcQueue(object):
 
         result = self._deferred_request.wait()
         del self.request_queue[0]
-        del self._deferred_request
-        self._deferred_request = None
+        self.abort()
         return result
+
+    def abort(self):
+        if hasattr(self, '_deferred_request'):
+            del self._deferred_request
+        self._deferred_request = None
+        self._deferred_start = None

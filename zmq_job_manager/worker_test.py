@@ -20,7 +20,7 @@ from zmq_helpers.socket_configs import get_run_context
 from zmq_helpers.rpc import ZmqRpcTask
 from zmq_helpers.utils import log_label
 
-from .rpc import DeferredZmqRpcQueue
+from zmq_job_manager.rpc import DeferredZmqRpcQueue
 
 
 class WorkerTest(ZmqRpcTask):
@@ -50,8 +50,8 @@ class WorkerTest(ZmqRpcTask):
     def rpc__process_queue_item(self, env, client_uuid):
         return self.deferred_queue.process_queue_item()
 
-    def rpc__next_result(self, env, client_uuid):
-        return self.deferred_queue.next_result()
+    def rpc__next_result(self, env, client_uuid, timeout_seconds=None):
+        return self.deferred_queue.next_result(timeout_seconds)
 
     def rpc__deferred_ready(self, env, client_uuid):
         return self.deferred_queue.ready()
@@ -88,8 +88,8 @@ class WorkerTest(ZmqRpcTask):
             functools.partial(self.timer__queue_monitor, io_loop), 10,
             io_loop=io_loop)
 
-        callbacks['event_sleep'] = PeriodicCallback(lambda: eventlet.sleep(),
-                                                    10, io_loop=io_loop)
+        callbacks['event_sleep'] = PeriodicCallback(eventlet.sleep, 10,
+                                                    io_loop=io_loop)
 
         def _on_run():
             logging.getLogger(log_label()).info('')

@@ -6,6 +6,10 @@ from zmq_helpers.rpc import ZmqRpcProxy
 import eventlet
 
 
+class TimeoutError(Exception):
+    pass
+
+
 class DeferredZmqRpcQueue(object):
     def __init__(self, rpc_uri, queue_storage=None, uuid=None):
         self.uris = OrderedDict(rpc=rpc_uri)
@@ -74,14 +78,19 @@ class DeferredZmqRpcQueue(object):
         while self.queue_length > 0:
             yield self.next_result()
 
-    def next_result(self):
+    def next_result(self, timeout_seconds=None):
         '''
         Process next item in queue and block until result is ready.  Return
         result.
         '''
         if (self._deferred_request is not None or
                 self.process_queue_item()):
+            start_time = datetime.now()
             while not self.ready():
+                if timeout_seconds and ((datetime.now() -
+                                         start_time).total_seconds() >
+                                        timeout_seconds):
+                    raise TimeoutError, 'No response after %s seconds' % timeout_seconds
                 eventlet.sleep(0.001)
             return self.wait()
         raise ValueError, 'There are no pending requests.'

@@ -33,7 +33,8 @@ class WorkerTest(ZmqRpcTask):
             self.uuid = str(uuid4())
         else:
             self.uuid = uuid
-        self.deferred_queue = DeferredZmqRpcQueue(supervisor_uri, uuid=uuid)
+        self.deferred_queue = DeferredZmqRpcQueue(supervisor_uri,
+                queue_storage=queue_storage, uuid=uuid)
 
     def get_uris(self):
         return self.uris
@@ -64,6 +65,7 @@ class WorkerTest(ZmqRpcTask):
             if not self.deferred_queue.request_pending:
                 self.deferred_queue.process_queue_item()
             elif self.deferred_queue.ready():
+                print 'Result is ready for request:', self.deferred_queue.ready()
                 result = self.deferred_queue.wait()
                 print result
             elif (self.deferred_queue._deferred_start and (datetime.now() -

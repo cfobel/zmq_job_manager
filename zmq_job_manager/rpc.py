@@ -20,7 +20,7 @@ class DeferredZmqRpcQueue(object):
             self.uuid = uuid
         self.proxy = ZmqRpcProxy(self.uris['rpc'], uuid=self.uuid)
         if queue_storage is None:
-            queue_storage = []
+            queue_storage = OrderedDict()
         self.request_queue = queue_storage
         self.abort()
 
@@ -29,7 +29,9 @@ class DeferredZmqRpcQueue(object):
         Queue request to be executed once all prior pending requests have been
         processed.
         '''
-        self.request_queue.append((command, args, kwargs))
+        request_uuid = str(uuid4())
+        self.request_queue[request_uuid] = (command, args, kwargs)
+        return request_uuid
 
     @property
     def request_pending(self):
@@ -68,7 +70,7 @@ class DeferredZmqRpcQueue(object):
             raise RuntimeError, ('Previous deferred request must be completed '
                                  'before processing the next deferred request.')
 
-        command, args, kwargs = self.request_queue[0]
+        self._active_uuid, (command, args, kwargs) = self.request_queue.items()[0]
         f = getattr(self.proxy, command)
         self._deferred_request = f.spawn(*args, **kwargs)
         self._deferred_start = datetime.now()
@@ -99,7 +101,9 @@ class DeferredZmqRpcQueue(object):
         '''
         Return the status of the current active/pending spawned request.
         '''
-        return self._deferred_request.ready()
+        if self._deferred_request and self._deferred_request.ready():
+            return self._active_uuid
+        return False
 
     def wait(self):
         '''
@@ -114,7 +118,7 @@ class DeferredZmqRpcQueue(object):
             raise RuntimeError, 'Deferred must be ready before calling wait'
 
         result = self._deferred_request.wait()
-        del self.request_queue[0]
+        del self.request_queue[self._active_uuid]
         self.abort()
         return result
 
@@ -123,3 +127,4 @@ class DeferredZmqRpcQueue(object):
             del self._deferred_request
         self._deferred_request = None
         self._deferred_start = None
+        self._active_uuid = None

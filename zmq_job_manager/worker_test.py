@@ -6,6 +6,9 @@ from .deferred import DeferredWorkerTask
 
 
 class TestWorkerTask(DeferredWorkerTask):
+    '''
+    Test class to demonstrate callback functionality.
+    '''
     def __init__(self, rpc_uri, supervisor_uri, queue_storage=None, uuid=None):
         super(TestWorkerTask, self).__init__(rpc_uri, supervisor_uri,
                                              queue_storage, uuid)

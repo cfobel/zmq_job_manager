@@ -24,6 +24,16 @@ from zmq_job_manager.rpc import DeferredZmqRpcQueue
 
 
 class DeferredWorkerTask(ZmqRpcTask):
+    '''
+    This class provides a ZeroMQ RPC API to interface with a
+    FIFO `DeferredZmqRpcQueue` for managing a set of asynchronous requests to a
+    supervisor process.
+
+    Periodically, the worker attempts to send the least recently queued request
+    to the supervisor.  If no response is received from the supervisor within
+    20 seconds, the request is aborted and restarted.  Otherwise, the response
+    from the completed request is printed to stdout.
+    '''
     def __init__(self, rpc_uri, supervisor_uri, queue_storage=None, uuid=None):
         self.uris = OrderedDict(rpc=rpc_uri)
         super(DeferredWorkerTask, self).__init__()

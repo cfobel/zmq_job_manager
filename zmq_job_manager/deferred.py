@@ -1,3 +1,5 @@
+import platform
+import os
 import signal
 import functools
 import logging
@@ -19,8 +21,33 @@ from zmq.eventloop.ioloop import PeriodicCallback
 from zmq_helpers.socket_configs import get_run_context
 from zmq_helpers.rpc import ZmqRpcTask
 from zmq_helpers.utils import log_label
+import psutil
+import netifaces
+from cpu_info.cpu_info import cpu_info, cpu_summary
 
 from zmq_job_manager.rpc import DeferredZmqRpcQueue
+
+
+def worker_info():
+    interfaces = [i for i in netifaces.interfaces()
+                  if netifaces.ifaddresses(i).get(netifaces.AF_INET,
+                                                  [{}])[0].get('addr')]
+    p = psutil.Process(os.getpid())
+    worker_memory = p.get_memory_info()._asdict()
+
+    d = OrderedDict([
+        ('cpu_summary', cpu_summary()),
+        ('cpu_info', cpu_info()),
+        ('hostname', platform.node()),
+        ('physical_memory', psutil.phymem_usage()._asdict()),
+        ('virtual_memory', psutil.virtual_memory()._asdict()),
+        ('worker_memory', worker_memory),
+        ('swap_memory', psutil.swap_memory()._asdict()),
+        ('interfaces', OrderedDict([
+            (i, netifaces.ifaddresses(i)[netifaces.AF_INET][0])
+                                    for i in interfaces])),
+    ])
+    return d
 
 
 class WorkerMonitorMixin(object):
@@ -64,6 +91,17 @@ class WorkerMonitorMixin(object):
                 # Timeout after no RPC response
                 logging.getLogger(log_label(self)).info('Timeout after no RPC response')
                 self.deferred_queue.abort()
+                self.register()
+
+    def register(self):
+        if not getattr(self, '_registration_pending', False):
+            self._registration_pending = True
+            self.insert_request('register_worker', worker_info(),
+                                callback=self.callback__register_worker)
+
+    def callback__register_worker(self, *args, **kwargs):
+        self._registration_pending = False
+        logging.getLogger(log_label(self)).info('')
 
     def handle_sigterm(self, io_loop):
         io_loop.stop()
@@ -105,6 +143,7 @@ class WorkerMonitorMixin(object):
             for c in callbacks.values():
                 c.start()
                 time.sleep(0.1)
+            self.register()
 
         io_loop.add_callback(_on_run)
 

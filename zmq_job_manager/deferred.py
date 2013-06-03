@@ -68,6 +68,16 @@ class WorkerMonitorMixin(object):
     def handle_sigterm(self, io_loop):
         io_loop.stop()
 
+    def timer__heartbeat(self, io_loop):
+        '''
+        Send a heartbeat request to the supervisor to notify that we are
+        still alive.
+        '''
+        if self.deferred_queue.queue_length <= 0:
+            logging.getLogger(log_label(self)).info('')
+            self.queue_request('heartbeat')
+            eventlet.sleep()
+
     def run(self):
         self.start_time = datetime.now()
 
@@ -83,6 +93,12 @@ class WorkerMonitorMixin(object):
 
         callbacks['event_sleep'] = PeriodicCallback(eventlet.sleep, 10,
                                                     io_loop=io_loop)
+
+        # Periodically send a heartbeat signal to let the supervisor know we're
+        # still running.
+        callbacks['heartbeat'] = PeriodicCallback(
+            functools.partial(self.timer__heartbeat, io_loop), 4000,
+            io_loop=io_loop)
 
         def _on_run():
             logging.getLogger(log_label()).info('')

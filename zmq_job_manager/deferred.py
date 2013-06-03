@@ -23,53 +23,20 @@ from zmq_helpers.utils import log_label
 from zmq_job_manager.rpc import DeferredZmqRpcQueue
 
 
-class DeferredWorkerTask(ZmqRpcTask):
+class WorkerMonitorMixin(object):
     '''
-    This class provides a ZeroMQ RPC API to interface with a
-    FIFO `DeferredZmqRpcQueue` for managing a set of asynchronous requests to a
-    supervisor process.
+    This task's run loop monitors and manages a FIFO `DeferredZmqRpcQueue` of
+    requests to be processed asynchronously by a supervisor process.
 
     Periodically, the worker attempts to send the least recently queued request
     to the supervisor.  If no response is received from the supervisor within
     20 seconds, the request is aborted and restarted.  Otherwise, the response
     from the completed request is printed to stdout.
+
+    Also, see the doctring for `DeferredZmqRpcQueue`.
     '''
-    def __init__(self, rpc_uri, supervisor_uri, queue_storage=None, uuid=None):
-        self.uris = OrderedDict(rpc=rpc_uri)
-        super(DeferredWorkerTask, self).__init__()
-        self.uris['supervisor'] = supervisor_uri
-
-        if uuid is None:
-            self.uuid = str(uuid4())
-        else:
-            self.uuid = uuid
-        self.deferred_queue = DeferredZmqRpcQueue(supervisor_uri,
-                queue_storage=queue_storage, uuid=uuid)
-        self.request_callbacks = OrderedDict()
-
     def get_uris(self):
         return self.uris
-
-    def rpc__queue_request(self, env, client_uuid, *args, **kwargs):
-        return self.deferred_queue.queue_request(*args, **kwargs)
-
-    def rpc__get_queue_length(self, env, client_uuid):
-        return self.deferred_queue.queue_length
-
-    def rpc__get_queue(self, env, client_uuid):
-        return self.deferred_queue.queue
-
-    def rpc__process_queue_item(self, env, client_uuid):
-        return self.deferred_queue.process_queue_item()
-
-    def rpc__next_result(self, env, client_uuid, timeout_seconds=None):
-        return self.deferred_queue.next_result(timeout_seconds)
-
-    def rpc__deferred_ready(self, env, client_uuid):
-        return self.deferred_queue.ready()
-
-    def rpc__deferred_wait(self, env, client_uuid):
-        return self.deferred_queue.wait()
 
     def _on_result_received(self, io_loop, request_uuid, result):
         print result
@@ -132,3 +99,42 @@ class DeferredWorkerTask(ZmqRpcTask):
                 'https://github.com/cfobel/zmq_job_manager/issues/4')
 
 
+class DeferredWorkerTask(WorkerMonitorMixin, ZmqRpcTask):
+    '''
+    This task provides a ZeroMQ RPC API to interface with a FIFO
+    `DeferredZmqRpcQueue` for managing a set of asynchronous requests to a
+    supervisor process.
+    '''
+    def __init__(self, rpc_uri, supervisor_uri, queue_storage=None, uuid=None):
+        self.uris = OrderedDict(rpc=rpc_uri)
+        super(DeferredWorkerTask, self).__init__()
+        self.uris['supervisor'] = supervisor_uri
+
+        if uuid is None:
+            self.uuid = str(uuid4())
+        else:
+            self.uuid = uuid
+        self.deferred_queue = DeferredZmqRpcQueue(supervisor_uri,
+                queue_storage=queue_storage, uuid=uuid)
+        self.request_callbacks = OrderedDict()
+
+    def rpc__queue_request(self, env, client_uuid, *args, **kwargs):
+        return self.deferred_queue.queue_request(*args, **kwargs)
+
+    def rpc__get_queue_length(self, env, client_uuid):
+        return self.deferred_queue.queue_length
+
+    def rpc__get_queue(self, env, client_uuid):
+        return self.deferred_queue.queue
+
+    def rpc__process_queue_item(self, env, client_uuid):
+        return self.deferred_queue.process_queue_item()
+
+    def rpc__next_result(self, env, client_uuid, timeout_seconds=None):
+        return self.deferred_queue.next_result(timeout_seconds)
+
+    def rpc__deferred_ready(self, env, client_uuid):
+        return self.deferred_queue.ready()
+
+    def rpc__deferred_wait(self, env, client_uuid):
+        return self.deferred_queue.wait()

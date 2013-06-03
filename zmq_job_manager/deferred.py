@@ -122,13 +122,32 @@ class WorkerMonitorMixin(object):
         raise SystemError, ('Forcing process to exit because of: '
                 'https://github.com/cfobel/zmq_job_manager/issues/4')
 
-    def queue_request(self, *args, **kwargs):
+    def _add_request(self, add_method_name, *args, **kwargs):
+        '''
+        Wrap the insert/queue methods of the underlying deferred request queue
+        to provide callback capabilities (based on request UUID).
+        '''
         logging.getLogger(log_label(self)).info(args[0])
         callback = kwargs.pop('callback', None)
-        request_uuid = self.deferred_queue.queue_request(*args, **kwargs)
+        request_uuid = getattr(self.deferred_queue, add_method_name)(*args,
+                                                                     **kwargs)
         if callback:
             self.request_callbacks[request_uuid] = callback
         return request_uuid
+
+    def insert_request(self, *args, **kwargs):
+        '''
+        See the _add_request method.
+        '''
+        logging.getLogger(log_label(self)).info(args[0])
+        return self._add_request('insert_request', *args, **kwargs)
+
+    def queue_request(self, *args, **kwargs):
+        '''
+        See the _add_request method.
+        '''
+        logging.getLogger(log_label(self)).info(args[0])
+        return self._add_request('queue_request', *args, **kwargs)
 
 
 class DeferredWorkerTask(WorkerMonitorMixin, ZmqRpcTask):
@@ -152,6 +171,9 @@ class DeferredWorkerTask(WorkerMonitorMixin, ZmqRpcTask):
                                               queue_storage=queue_storage,
                                               uuid=uuid)
         self.request_callbacks = OrderedDict()
+
+    def rpc__insert_request(self, env, client_uuid, *args, **kwargs):
+        return self.insert_request(*args, **kwargs)
 
     def rpc__queue_request(self, env, client_uuid, *args, **kwargs):
         return self.queue_request(*args, **kwargs)

@@ -131,6 +131,14 @@ class DeferredZmqRpcQueue(object):
         self._store_request(request_uuid, request)
         return request_uuid
 
+    def insert_request(self, command, *args, **kwargs):
+        '''
+        Insert request in queue before all prior pending requests.
+        '''
+        request_uuid, request = self._make_request(command, *args, **kwargs)
+        self._insert_request(request_uuid, request)
+        return request_uuid
+
     @property
     def request_pending(self):
         '''
@@ -256,6 +264,17 @@ class DeferredZmqRpcQueue(object):
         '''
         self.request_queue[request_uuid] = request
 
+    def _insert_request(self, request_uuid, request):
+        '''
+        Insert a request at the beginning of the queue, referenced by the
+        request's UUID.
+        '''
+        new_queue = OrderedDict()
+        new_queue[request_uuid] = request
+        for u, r in self.request_queue.iteritems():
+            new_queue[u] = r
+        self.request_queue = new_queue
+
     def _next_request(self):
         '''
         Retrieve the next request from the queue, along with the corresponding
@@ -295,8 +314,22 @@ class DeferredTransactionalZmqRpcQueue(DeferredZmqRpcQueue):
         Store a request in the queue, referenced by the request's UUID.
         '''
         self.request_queue.abort()
-        queue = self.request_queue.root.setdefault('queue', PersistentOrderedDict())
+        queue = self.request_queue.root.setdefault('queue',
+                                                   PersistentOrderedDict())
         queue[request_uuid] = request
+        self.request_queue.commit()
+
+    def _insert_request(self, request_uuid, request):
+        '''
+        Insert a request at the beginning of the queue, referenced by the
+        request's UUID.
+        '''
+        self.request_queue.abort()
+        queue = self.request_queue.root.setdefault('queue',
+                                                   PersistentOrderedDict())
+        queue[request_uuid] = request
+        # Move request to beginning of queue
+        queue.move_to_end(request_uuid, last=False)
         self.request_queue.commit()
 
     def _next_request(self):

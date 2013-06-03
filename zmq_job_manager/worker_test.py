@@ -20,8 +20,8 @@ class TestWorkerTask(DeferredWorkerTask):
         self.request_callbacks = OrderedDict()
 
     def rpc__test_callback(self, env, client_uuid, *args, **kwargs):
-        request_uuid = self.deferred_queue.queue_request(*args, **kwargs)
-        self.request_callbacks[request_uuid] = self._handle_request_callback
+        kwargs['callback'] = self._handle_request_callback
+        return self.queue_request(*args, **kwargs)
 
     def _handle_request_callback(self, request_uuid, result):
         print 'Processing callback for %s' % (request_uuid, )

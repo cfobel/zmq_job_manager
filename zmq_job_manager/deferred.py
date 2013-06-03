@@ -49,7 +49,7 @@ class WorkerMonitorMixin(object):
     def _on_result_received(self, io_loop, request_uuid, result):
         print result
 
-    def timer__queue_monitor(self, io_loop):
+    def timer__supervisor_queue_monitor(self, io_loop):
         if self.deferred_queue.queue_length > 0:
             if not self.deferred_queue.request_pending:
                 self.deferred_queue.process_queue_item()
@@ -87,8 +87,8 @@ class WorkerMonitorMixin(object):
 
         # Periodically send a heartbeat signal to let the supervisor know we're
         # still running.
-        callbacks['queue_monitor'] = PeriodicCallback(
-            functools.partial(self.timer__queue_monitor, io_loop), 1000,
+        callbacks['supervisor_queue_monitor'] = PeriodicCallback(
+            functools.partial(self.timer__supervisor_queue_monitor, io_loop), 1000,
             io_loop=io_loop)
 
         callbacks['event_sleep'] = PeriodicCallback(eventlet.sleep, 10,
@@ -122,6 +122,14 @@ class WorkerMonitorMixin(object):
         raise SystemError, ('Forcing process to exit because of: '
                 'https://github.com/cfobel/zmq_job_manager/issues/4')
 
+    def queue_request(self, *args, **kwargs):
+        logging.getLogger(log_label(self)).info(args[0])
+        callback = kwargs.pop('callback', None)
+        request_uuid = self.deferred_queue.queue_request(*args, **kwargs)
+        if callback:
+            self.request_callbacks[request_uuid] = callback
+        return request_uuid
+
 
 class DeferredWorkerTask(WorkerMonitorMixin, ZmqRpcTask):
     '''
@@ -146,7 +154,7 @@ class DeferredWorkerTask(WorkerMonitorMixin, ZmqRpcTask):
         self.request_callbacks = OrderedDict()
 
     def rpc__queue_request(self, env, client_uuid, *args, **kwargs):
-        return self.deferred_queue.queue_request(*args, **kwargs)
+        return self.queue_request(*args, **kwargs)
 
     def rpc__get_queue_length(self, env, client_uuid):
         return self.deferred_queue.queue_length

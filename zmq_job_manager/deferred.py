@@ -35,6 +35,14 @@ class WorkerMonitorMixin(object):
 
     Also, see the doctring for `DeferredZmqRpcQueue`.
     '''
+    queue_class = None
+
+    def make_queue(self, supervisor_uri, queue_storage, uuid):
+        if self.queue_class is None:
+            raise ValueError, 'Default queue class must be set'
+        return self.queue_class(supervisor_uri, queue_storage=queue_storage,
+                                uuid=uuid)
+
     def get_uris(self):
         return self.uris
 
@@ -105,6 +113,8 @@ class DeferredWorkerTask(WorkerMonitorMixin, ZmqRpcTask):
     `DeferredZmqRpcQueue` for managing a set of asynchronous requests to a
     supervisor process.
     '''
+    queue_class = DeferredZmqRpcQueue
+
     def __init__(self, rpc_uri, supervisor_uri, queue_storage=None, uuid=None):
         self.uris = OrderedDict(rpc=rpc_uri)
         super(DeferredWorkerTask, self).__init__()
@@ -114,8 +124,9 @@ class DeferredWorkerTask(WorkerMonitorMixin, ZmqRpcTask):
             self.uuid = str(uuid4())
         else:
             self.uuid = uuid
-        self.deferred_queue = DeferredZmqRpcQueue(supervisor_uri,
-                queue_storage=queue_storage, uuid=uuid)
+        self.deferred_queue = self.make_queue(supervisor_uri,
+                                              queue_storage=queue_storage,
+                                              uuid=uuid)
         self.request_callbacks = OrderedDict()
 
     def rpc__queue_request(self, env, client_uuid, *args, **kwargs):

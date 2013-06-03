@@ -3,6 +3,7 @@ from collections import OrderedDict
 from uuid import uuid4
 
 from zmq_helpers.rpc import ZmqRpcProxy
+from persistent_helpers.durus_types import PersistentOrderedDict
 import eventlet
 
 
@@ -264,3 +265,44 @@ class DeferredZmqRpcQueue(object):
         return request_uuid, request
     # [END] Request handling methods
     #---------------------------------------------------------------------------
+
+class DeferredTransactionalZmqRpcQueue(DeferredZmqRpcQueue):
+    @property
+    def queue_length(self):
+        '''
+        Return the length of the current request queue.
+        '''
+        return ('queue' in self.request_queue.root and
+                len(self.request_queue.root['queue']))
+
+    @property
+    def queue(self):
+        '''
+        Return the current request queue contents.
+        '''
+        return self.request_queue.root['queue']
+
+    def _clear_request(self, request_uuid):
+        '''
+        Remove a request from the queue by the request's UUID.
+        '''
+        self.request_queue.abort()
+        del self.request_queue.root['queue'][request_uuid]
+        self.request_queue.commit()
+
+    def _store_request(self, request_uuid, request):
+        '''
+        Store a request in the queue, referenced by the request's UUID.
+        '''
+        self.request_queue.abort()
+        queue = self.request_queue.root.setdefault('queue', PersistentOrderedDict())
+        queue[request_uuid] = request
+        self.request_queue.commit()
+
+    def _next_request(self):
+        '''
+        Retrieve the next request from the queue, along with the corresponding
+        request UUID.
+        '''
+        request_uuid, request = self.request_queue.root['queue'].items()[0]
+        return request_uuid, request

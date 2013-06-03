@@ -2,13 +2,18 @@ from collections import OrderedDict
 from uuid import uuid4
 import logging
 
+from persistent_helpers.storage import DurusStorage
+
 from .deferred import DeferredWorkerTask
+from .rpc import DeferredTransactionalZmqRpcQueue
 
 
 class TestWorkerTask(DeferredWorkerTask):
     '''
     Test class to demonstrate callback functionality.
     '''
+    queue_class = DeferredTransactionalZmqRpcQueue
+
     def __init__(self, rpc_uri, supervisor_uri, queue_storage=None, uuid=None):
         super(TestWorkerTask, self).__init__(rpc_uri, supervisor_uri,
                                              queue_storage, uuid)
@@ -57,5 +62,7 @@ if __name__ == '__main__':
                         format="%(asctime)s-%(name)s-%(levelname)s:%(message)s")
     logging.info('test log')
     args = parse_args()
-    w = TestWorkerTask(args.rpc_uri, args.supervisor_uri, uuid=args.worker_uuid)
+    storage = DurusStorage(host='worker-test.durus.dat', port=False)
+    w = TestWorkerTask(args.rpc_uri, args.supervisor_uri,
+                       queue_storage=storage, uuid=args.worker_uuid)
     w.run()

@@ -2,6 +2,7 @@ from collections import OrderedDict
 from uuid import uuid4
 import logging
 
+from path import path
 from persistent_helpers.storage import DurusStorage
 from zmq_helpers.utils import log_label
 
@@ -58,4 +59,24 @@ if __name__ == '__main__':
     storage = DurusStorage(host='%s.durus.dat' % args.worker_uuid, port=False)
     w = TestWorkerTask(args.rpc_uri, args.supervisor_uri,
                        queue_storage=storage, uuid=args.worker_uuid)
-    w.run()
+    try:
+        w.run()
+    except:
+        raise
+    finally:
+        # Delete persistent queue file if the queue is empty
+        queue = storage.root.get('queue', {})
+        storage.connection.storage.close()
+        if len(queue.keys()) <= 0:
+            logging.getLogger(log_label()).info(
+                'Deleting queue file(s), since queue is empty')
+            storage_path = path(storage.host)
+            if storage_path.isfile():
+                storage_path.remove()
+                logging.getLogger(log_label()).info(
+                    'Deleted: %s' % storage_path)
+            prepack_path = path('%s.prepack' % storage_path)
+            if prepack_path.isfile():
+                prepack_path.remove()
+                logging.getLogger(log_label()).info(
+                    'Deleted: %s' % prepack_path)

@@ -1,4 +1,5 @@
 import platform
+from threading import Thread
 import os
 import signal
 import functools
@@ -13,7 +14,9 @@ except ImportError:
     import pickle
 
 import eventlet
+import zmq
 from zmq.eventloop.ioloop import PeriodicCallback
+from zmq.utils import jsonapi
 # The following durus imports cause the worker process to hang
 # (see #4, https://github.com/cfobel/zmq_job_manager/issues/4)
 # For now, the worker process throws a `SystemError` exception when terminating
@@ -26,6 +29,28 @@ import netifaces
 from cpu_info.cpu_info import cpu_info, cpu_summary
 
 from zmq_job_manager.rpc import DeferredZmqRpcQueue
+from zmq_job_manager.process import PopenPipeReactor
+from zmq_job_manager.constants import SERIALIZE__PICKLE, SERIALIZE__JSON
+from zmq_job_manager.manager import get_seconds_since_epoch
+
+
+class PushPopenReactor(PopenPipeReactor):
+    def communicate(self, push_uri):
+        self.ctx = zmq.Context.instance()
+        self.push_uri = push_uri
+        self.push_socket = zmq.Socket(self.ctx, zmq.PUSH)
+        self.push_socket.connect(push_uri)
+        super(PushPopenReactor, self).communicate()
+
+    def on_stdout(self, value):
+        self.push_socket.send_pyobj(('stdout', value))
+
+    def on_stderr(self, value):
+        self.push_socket.send_pyobj(('stderr', value))
+
+    def __del__(self):
+        del self.push_socket
+        del self.ctx
 
 
 def worker_info():
@@ -48,6 +73,142 @@ def worker_info():
                                     for i in interfaces])),
     ])
     return d
+
+
+class TaskMonitor(object):
+    def __init__(self, worker):
+        self.worker = worker
+        self._task = None
+        self._thread = None
+        self._uuid = None
+        self._deferred = None
+        self._request_task_pending = False
+        self.ctx = zmq.Context.instance()
+        self.pull_uri = 'inproc://task_monitor'
+        self.pull_socket = zmq.Socket(self.ctx, zmq.PULL)
+        self.pull_socket.bind(self.pull_uri)
+
+    def __del__(self):
+        del self.pull_socket
+        del self.ctx
+
+    def _store_std_output(self):
+        try:
+            while True:
+                output_type, value = (
+                        self.pull_socket.recv_pyobj(flags=zmq.NOBLOCK))
+                self.worker.queue_request(output_type, value)
+                logging.getLogger(log_label(self)).info('[%s] %s', output_type,
+                                                        value)
+        except zmq.Again:
+            # No more data in output queue.
+            pass
+
+    def update_state(self):
+        self._store_std_output()
+        if self._thread is not None:
+            logging.getLogger(log_label(self)).debug('self._thread %s',
+                                                     self._thread)
+            if not self._thread.isAlive():
+                # The task thread has completed, so perform finalization.
+                self._finalize()
+            else:
+                # The task thread is still running, so try to join, but timeout
+                # if the task thread is still not ready.
+                self._thread.join(0.01)
+        elif not self._request_task_pending:
+            # There is no task thread currently running and there is no task
+            # request pending, so request a task from the supervisor, using a
+            # callback to process the result.
+            self._request_task_pending = True
+            self.worker.queue_request('request_task',
+                                      callback=self.callback__request_task)
+
+    def callback__complete_task(self, request_uuid, result):
+        # The response from a previous asynchronous task completed request from
+        # the supervisor is ready.  Reset state to accept new task.
+        logging.getLogger(log_label(self)).info('Task completed: %s',
+                                                request_uuid)
+        self._reset()
+
+    def callback__request_task(self, request_uuid, result):
+        # The response from a previous asynchronous task request from the
+        # supervisor is ready.
+        result = pickle.loads(str(result))
+        if result:
+            uuid, p = result
+            # The supervisor provided a task to run.
+            logging.getLogger(log_label(self)).info('task received: %s',
+                                                    (uuid, p._args))
+            task_uuid, task = result
+            self._task = task
+            self._uuid = task_uuid
+            self._thread = self.start()
+            self._request_task_pending = False
+        else:
+            # The supervisor did not have any task to run, so reset the
+            # task request state, preparing to send a new request on the
+            # next task monitor timer callback.
+            self._reset()
+
+    def start(self):
+        # Run a task in a subprocess, forwarding any `stdout` or `stderr`
+        # output to supervisor.
+        logging.getLogger(log_label(self)).info(self._uuid)
+        # Run an IO-loop here, to allow useful work while the subprocess is
+        # run in the background thread, `t`.
+        self._env = os.environ.copy()
+        self._env.update({'ZMQ_JOB_MANAGER__SUPERVISOR_URI':
+                           self.worker.uris['supervisor'],
+                          'ZMQ_JOB_MANAGER__WORKER_UUID': self.worker.uuid,
+                          'ZMQ_JOB_MANAGER__TASK_UUID': self._uuid, })
+                          #'ZMQ_JOB_MANAGER__WORKER_URI':
+                           #self.worker.uris['pull'], })
+
+        p = self._task.make(popen_class=PushPopenReactor, env=self._env)
+        task_thread = Thread(target=p.communicate, args=(self.pull_uri, ))
+        task_thread.daemon = True
+        task_thread.start()
+        self._begin()
+        return task_thread
+
+    def _store(self, key, value, **kwargs):
+        kwargs_ = {'task_uuid': self._uuid}
+        kwargs_.update(kwargs)
+        self.worker.queue_request('store', key, value, **kwargs_)
+
+    def _begin(self):
+        self._store('__task__', pickle.dumps(self._task),
+                    serialization=SERIALIZE__PICKLE)
+        self._store('__env__', pickle.dumps(self._env),
+                    serialization=SERIALIZE__PICKLE)
+        self.worker.queue_request('begin_task', self._uuid)
+
+    def _finalize(self):
+        logging.getLogger(log_label(self)).info(self._uuid)
+        self._complete()
+        self._thread.join()
+        self._reset()
+
+    def _complete(self):
+        self._store('done', pickle.dumps(datetime.now()),
+                    serialization=SERIALIZE__PICKLE)
+        self.worker.queue_request('complete_task', self._uuid,
+                                  callback=self.callback__complete_task)
+
+    def handle_sigterm(self):
+        #import pudb; pudb.set_trace()
+        if self._thread is not None:
+            self.worker.queue_request('store', '__sigterm_caught__',
+                                      jsonapi.dumps(get_seconds_since_epoch()),
+                                      serialization=SERIALIZE__JSON)
+
+    def _reset(self):
+        for name in ('_thread', '_task', '_uuid'):
+            if hasattr(self, name):
+                delattr(self, name)
+            setattr(self, name, None)
+        self._request_task_pending = False
 
 
 class WorkerMonitorMixin(object):
@@ -116,17 +277,21 @@ class WorkerMonitorMixin(object):
             self.queue_request('heartbeat')
             eventlet.sleep()
 
+    def timer__task_monitor(self, io_loop):
+        self._task_monitor.update_state()
+
     def run(self):
         self.start_time = datetime.now()
+        self._task_monitor = TaskMonitor(self)
 
         ctx, io_loop, socks, streams = get_run_context(self.sock_configs)
 
         callbacks = OrderedDict()
 
-        # Periodically send a heartbeat signal to let the supervisor know we're
-        # still running.
+        # Periodically process the next queued request (if available) ready for
+        # the supervisor.
         callbacks['supervisor_queue_monitor'] = PeriodicCallback(
-            functools.partial(self.timer__supervisor_queue_monitor, io_loop), 1000,
+            functools.partial(self.timer__supervisor_queue_monitor, io_loop), 10,
             io_loop=io_loop)
 
         callbacks['event_sleep'] = PeriodicCallback(eventlet.sleep, 10,
@@ -136,6 +301,14 @@ class WorkerMonitorMixin(object):
         # still running.
         callbacks['heartbeat'] = PeriodicCallback(
             functools.partial(self.timer__heartbeat, io_loop), 4000,
+            io_loop=io_loop)
+
+        # Periodically check and update task state.  When no task is running,
+        # this means requesting a new task from the supervisor.  When a task is
+        # running, wait until the task finishes, then finalize the task and
+        # prepare to request a new task from the supervisor.
+        callbacks['task_monitor'] = PeriodicCallback(
+            functools.partial(self.timer__task_monitor, io_loop), 500,
             io_loop=io_loop)
 
         def _on_run():

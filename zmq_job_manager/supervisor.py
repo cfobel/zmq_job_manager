@@ -10,6 +10,8 @@ from zmq_helpers.socket_configs import DeferredSocket
 from zmq_helpers.rpc import ZmqRpcTask, ZmqRpcProxy
 from zmq_helpers.utils import log_label
 
+from . import configure_logger
+
 
 class WorkerState(object):
     def __init__(self, uuid, task_uuid=None, heartbeat_count=None):
@@ -457,6 +459,9 @@ usage for details).
 Note that the supervisor does not actually store any output from the
 workers/tasks.
     '''.strip())
+    parser.add_argument('--log_level', choices=('info', 'debug', 'warning',
+                                                'error', 'critical'),
+                        default='warning')
     parser.add_argument(nargs=1, dest='rpc_uri', type=str)
     parser.add_argument(nargs=1, dest='manager_rpc_uri', type=str)
     args = parser.parse_args()
@@ -466,8 +471,7 @@ workers/tasks.
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    #logging.basicConfig(level=logging.CRITICAL)
     args = parse_args()
+    configure_logger(eval('logging.%s' % args.log_level.upper()))
     b = Supervisor(args.manager_rpc_uri, args.rpc_uri)
     b.run()

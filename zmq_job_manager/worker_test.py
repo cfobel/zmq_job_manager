@@ -55,7 +55,7 @@ def parse_args():
 if __name__ == '__main__':
     args = parse_args()
     configure_logger(eval('logging.%s' % args.log_level.upper()))
-    storage = DurusStorage(host='worker-test.durus.dat', port=False)
+    storage = DurusStorage(host='%s.durus.dat' % args.worker_uuid, port=False)
     w = TestWorkerTask(args.rpc_uri, args.supervisor_uri,
                        queue_storage=storage, uuid=args.worker_uuid)
     w.run()

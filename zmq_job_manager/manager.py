@@ -62,19 +62,19 @@ class Manager(ZmqRpcTask):
         if task_uuid is None and uuid in self.task_by_worker:
             task_uuid = self.task_by_worker[uuid]
         if task_uuid is not None:
-            message = '[%s] uuid=%s, %s=%s' % (log_label(self), uuid, key, value)
-            logging.getLogger(log_label(self)).info(message)
+            message = '[%s] uuid=%s, %s=%s' % (log_label(self), uuid, key, value[:150])
+            logging.getLogger(log_label(self)).debug(message)
             self.publish(env, uuid, task_uuid, 'store', serialization, key, value)
             return message
 
     def rpc__stdout(self, env, uuid, value):
         message = self._rpc__std_base(env, uuid, 'stdout', value)
-        logging.getLogger(log_label(self)).info(message)
+        logging.getLogger(log_label(self)).debug(message)
         return message
 
     def rpc__stderr(self, env, uuid, value):
         message = self._rpc__std_base(env, uuid, 'stderr', value)
-        logging.getLogger(log_label(self)).info(message)
+        logging.getLogger(log_label(self)).debug(message)
         return message
 
     def _rpc__std_base(self, env, uuid, stream_name, value):

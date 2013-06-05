@@ -21,9 +21,9 @@ from zmq.utils import jsonapi
 # (see #4, https://github.com/cfobel/zmq_job_manager/issues/4)
 # For now, the worker process throws a `SystemError` exception when terminating
 # to force termination.
-from zmq_helpers.socket_configs import get_run_context
+from zmq_helpers.socket_configs import DeferredSocket, get_run_context
 from zmq_helpers.rpc import ZmqRpcTask
-from zmq_helpers.utils import log_label
+from zmq_helpers.utils import log_label, unique_ipc_uri, cleanup_ipc_uris
 import psutil
 import netifaces
 from cpu_info.cpu_info import cpu_info, cpu_summary
@@ -159,11 +159,11 @@ class TaskMonitor(object):
         # run in the background thread, `t`.
         self._env = os.environ.copy()
         self._env.update({'ZMQ_JOB_MANAGER__SUPERVISOR_URI':
-                           self.worker.uris['supervisor'],
+                          self.worker.uris['supervisor'],
                           'ZMQ_JOB_MANAGER__WORKER_UUID': self.worker.uuid,
-                          'ZMQ_JOB_MANAGER__TASK_UUID': self._uuid, })
-                          #'ZMQ_JOB_MANAGER__WORKER_URI':
-                           #self.worker.uris['pull'], })
+                          'ZMQ_JOB_MANAGER__TASK_UUID': self._uuid,
+                          'ZMQ_JOB_MANAGER__WORKER_URI':
+                          self.worker.uris['pull'], })
 
         p = self._task.make(popen_class=PushPopenReactor, env=self._env)
         task_thread = Thread(target=p.communicate, args=(self.pull_uri, ))
@@ -234,16 +234,27 @@ class WorkerMonitorMixin(object):
     def get_uris(self):
         return self.uris
 
+    def get_sock_configs(self):
+        sock_configs = super(WorkerMonitorMixin, self).get_sock_configs()
+        sock_configs['pull'] = (DeferredSocket(zmq.PULL)
+                                .stream_callback('on_recv',
+                                                 self.callback__pull_on_recv))
+        return sock_configs
+
+    def callback__pull_on_recv(self, env, multipart_message):
+        task_uuid, command = multipart_message[:2]
+        args, kwargs = map(pickle.loads, multipart_message[2:])
+        logging.getLogger(log_label(self)).debug('store: %s', args[0])
+        self.queue_request(command, *args, **kwargs)
+
     def _on_result_received(self, io_loop, request_uuid, result):
-        print result
+        logging.getLogger(log_label(self)).debug('result: %s', result)
 
     def timer__supervisor_queue_monitor(self, io_loop):
         if self.deferred_queue.queue_length > 0:
             if not self.deferred_queue.request_pending:
                 self.deferred_queue.process_queue_item()
             elif self.deferred_queue.ready():
-                print 'Result is ready for request:', (
-                        self.deferred_queue.ready())
                 request_uuid = self.deferred_queue.ready()
                 result = self.deferred_queue.wait()
                 self._on_result_received(io_loop, request_uuid, result)
@@ -371,7 +382,7 @@ class DeferredWorkerTask(WorkerMonitorMixin, ZmqRpcTask):
     queue_class = DeferredZmqRpcQueue
 
     def __init__(self, rpc_uri, supervisor_uri, queue_storage=None, uuid=None):
-        self.uris = OrderedDict(rpc=rpc_uri)
+        self.uris = OrderedDict(rpc=rpc_uri, pull=unique_ipc_uri())
         super(DeferredWorkerTask, self).__init__()
         self.uris['supervisor'] = supervisor_uri
 
@@ -407,3 +418,7 @@ class DeferredWorkerTask(WorkerMonitorMixin, ZmqRpcTask):
 
     def rpc__deferred_wait(self, env, client_uuid):
         return self.deferred_queue.wait()
+
+    def __del__(self):
+        super(DeferredWorkerTask, self).__del__()
+        cleanup_ipc_uris([self.uris['pull']])

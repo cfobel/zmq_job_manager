@@ -3,6 +3,7 @@ from uuid import uuid4
 import logging
 
 from persistent_helpers.storage import DurusStorage
+from zmq_helpers.utils import log_label
 
 from .deferred import DeferredWorkerTask
 from .rpc import DeferredTransactionalZmqRpcQueue
@@ -25,14 +26,12 @@ class TestWorkerTask(DeferredWorkerTask):
         return self.queue_request(*args, **kwargs)
 
     def _handle_request_callback(self, request_uuid, result):
-        print 'Processing callback for %s' % (request_uuid, )
-        print result
+        logging.getLogger(log_label(self)).info('Processing callback for %s',
+                                                request_uuid)
 
     def _on_result_received(self, io_loop, request_uuid, result):
         if request_uuid in self.request_callbacks:
             self.request_callbacks[request_uuid](request_uuid, result)
-        else:
-            print result
 
 
 def parse_args():

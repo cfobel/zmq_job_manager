@@ -16,6 +16,7 @@ from zmq_helpers.utils import log_label, get_public_ip
 
 from .process import DeferredPopen
 from .constants import SERIALIZE__NONE, SERIALIZE__JSON
+from . import configure_logger
 
 
 def get_seconds_since_epoch():
@@ -198,6 +199,9 @@ def parse_args():
     from argparse import ArgumentParser
 
     parser = ArgumentParser(description='''Job manager manager''')
+    parser.add_argument('--log_level', choices=('info', 'debug', 'warning',
+                                                'error', 'critical'),
+                        default='warning')
     parser.add_argument(nargs=1, dest='pub_uri', type=str)
     parser.add_argument(nargs=1, dest='rep_uri', type=str)
     args = parser.parse_args()
@@ -207,7 +211,7 @@ def parse_args():
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.WARNING)
     args = parse_args()
+    configure_logger(eval('logging.%s' % args.log_level.upper()))
     m = Manager(args.pub_uri, args.rep_uri)
     m.run()

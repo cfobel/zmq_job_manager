@@ -6,6 +6,7 @@ from persistent_helpers.storage import DurusStorage
 
 from .deferred import DeferredWorkerTask
 from .rpc import DeferredTransactionalZmqRpcQueue
+from . import configure_logger
 
 
 class TestWorkerTask(DeferredWorkerTask):
@@ -39,6 +40,9 @@ def parse_args():
     from argparse import ArgumentParser
 
     parser = ArgumentParser(description='''Worker demo''')
+    parser.add_argument('--log_level', choices=('info', 'debug', 'warning',
+                                                'error', 'critical'),
+                        default='warning')
     parser.add_argument(nargs=1, dest='supervisor_uri', type=str)
     parser.add_argument(nargs=1, dest='rpc_uri', type=str)
     parser.add_argument(nargs='?', dest='worker_uuid', type=str,
@@ -50,18 +54,8 @@ def parse_args():
 
 
 if __name__ == '__main__':
-    # if someone tried to log something before basicConfig is called, Python
-    # creates a default handler that
-    # goes to the console and will ignore further basicConfig calls. Remove the
-    # handler if there is one.
-    root = logging.getLogger()
-    if root.handlers:
-        for handler in root.handlers:
-            root.removeHandler(handler)
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s-%(name)s-%(levelname)s:%(message)s")
-    logging.info('test log')
     args = parse_args()
+    configure_logger(eval('logging.%s' % args.log_level.upper()))
     storage = DurusStorage(host='worker-test.durus.dat', port=False)
     w = TestWorkerTask(args.rpc_uri, args.supervisor_uri,
                        queue_storage=storage, uuid=args.worker_uuid)

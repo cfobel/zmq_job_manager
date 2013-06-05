@@ -339,3 +339,6 @@ class DeferredTransactionalZmqRpcQueue(DeferredZmqRpcQueue):
         '''
         request_uuid, request = self.request_queue.root['queue'].items()[0]
         return request_uuid, request
+
+    def pack(self):
+        self.request_queue.pack()

@@ -291,6 +291,12 @@ class WorkerMonitorMixin(object):
     def timer__task_monitor(self, io_loop):
         self._task_monitor.update_state()
 
+    def timer__pack(self, io_loop):
+        if hasattr(self.deferred_queue, 'pack'):
+            self.deferred_queue.pack()
+            logging.getLogger(log_label(self)).info(
+                'request queue length: %s', self.deferred_queue.queue_length)
+
     def run(self):
         self.start_time = datetime.now()
         self._task_monitor = TaskMonitor(self)
@@ -322,6 +328,10 @@ class WorkerMonitorMixin(object):
             functools.partial(self.timer__task_monitor, io_loop), 500,
             io_loop=io_loop)
 
+        # Periodically pack the queue storage (if applicable).
+        callbacks['pack'] = PeriodicCallback(
+            functools.partial(self.timer__pack, io_loop), 15000,
+            io_loop=io_loop)
         def _on_run():
             logging.getLogger(log_label()).info('')
             for c in callbacks.values():

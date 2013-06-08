@@ -109,7 +109,7 @@ class TaskMonitor(object):
         if self._thread is not None:
             logging.getLogger(log_label(self)).debug('self._thread %s',
                                                      self._thread)
-            if not self._thread.isAlive():
+            if not self._thread.isAlive() and self.worker.deferred_queue.queue_length <= 0:
                 # The task thread has completed, so perform finalization.
                 self._finalize()
             else:

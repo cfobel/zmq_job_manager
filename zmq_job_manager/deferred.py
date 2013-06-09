@@ -198,7 +198,7 @@ class TaskMonitor(object):
         self._thread.join()
 
     def handle_sigterm(self):
-        #import pudb; pudb.set_trace()
+        logging.getLogger(log_label(self)).error(str(datetime.now()))
         if self._thread is not None:
             self.worker.queue_request('store', '__sigterm_caught__',
                                       jsonapi.dumps(get_seconds_since_epoch()),
@@ -276,7 +276,8 @@ class WorkerMonitorMixin(object):
         self._registration_pending = False
         logging.getLogger(log_label(self)).info('')
 
-    def handle_sigterm(self, io_loop):
+    def handle_sigterm(self, io_loop, signum, frame):
+        self._task_monitor.handle_sigterm()
         io_loop.stop()
 
     def timer__heartbeat(self, io_loop):
@@ -291,7 +292,7 @@ class WorkerMonitorMixin(object):
 
     def timer__task_monitor(self, io_loop):
         task_count_limit = getattr(self, 'task_count_limit', 1)
-        completed_task_count = self._task_monitor._task_count 
+        completed_task_count = self._task_monitor._task_count
         if task_count_limit > 0 and completed_task_count >= task_count_limit:
             io_loop.stop()
         else:

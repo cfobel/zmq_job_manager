@@ -17,7 +17,9 @@ class TestWorkerTask(DeferredWorkerTask):
     '''
     queue_class = DeferredTransactionalZmqRpcQueue
 
-    def __init__(self, rpc_uri, supervisor_uri, queue_storage=None, uuid=None):
+    def __init__(self, rpc_uri, supervisor_uri, task_count_limit=1,
+                 queue_storage=None, uuid=None):
+        self.task_count_limit = task_count_limit
         super(TestWorkerTask, self).__init__(rpc_uri, supervisor_uri,
                                              queue_storage, uuid)
         self.request_callbacks = OrderedDict()
@@ -43,6 +45,10 @@ def parse_args():
     parser.add_argument('--log_level', choices=('info', 'debug', 'warning',
                                                 'error', 'critical'),
                         default='warning')
+    parser.add_argument('-c', '--task_count', type=int, default=1,
+                        help='Number of tasks to run before exiting.  A value'
+                        ' <= 0 results will cause the worker to continue '
+                        'running until killed. (default=%(default)s)')
     parser.add_argument(nargs=1, dest='supervisor_uri', type=str)
     parser.add_argument(nargs=1, dest='rpc_uri', type=str)
     parser.add_argument(nargs='?', dest='worker_uuid', type=str,
@@ -58,7 +64,8 @@ if __name__ == '__main__':
     configure_logger(eval('logging.%s' % args.log_level.upper()))
     storage = DurusStorage(host='%s.durus.dat' % args.worker_uuid, port=False)
     w = TestWorkerTask(args.rpc_uri, args.supervisor_uri,
-                       queue_storage=storage, uuid=args.worker_uuid)
+                       queue_storage=storage, uuid=args.worker_uuid,
+                       task_count_limit=args.task_count)
     try:
         w.run()
     except:

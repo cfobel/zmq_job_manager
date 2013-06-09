@@ -87,6 +87,7 @@ class TaskMonitor(object):
         self.pull_uri = 'inproc://task_monitor'
         self.pull_socket = zmq.Socket(self.ctx, zmq.PULL)
         self.pull_socket.bind(self.pull_uri)
+        self._task_count = 0
 
     def __del__(self):
         del self.pull_socket
@@ -127,9 +128,10 @@ class TaskMonitor(object):
     def callback__complete_task(self, request_uuid, result):
         # The response from a previous asynchronous task completed request from
         # the supervisor is ready.  Reset state to accept new task.
-        logging.getLogger(log_label(self)).info('Task completed: %s',
-                                                request_uuid)
         self._reset()
+        self._task_count += 1
+        logging.getLogger(log_label(self)).info('Task completed: %s (%d total)',
+                                                request_uuid, self._task_count)
 
     def callback__request_task(self, request_uuid, result):
         # The response from a previous asynchronous task request from the
@@ -187,14 +189,13 @@ class TaskMonitor(object):
     def _finalize(self):
         logging.getLogger(log_label(self)).info(self._uuid)
         self._complete()
-        self._thread.join()
-        self._reset()
 
     def _complete(self):
         self._store('done', pickle.dumps(datetime.now()),
                     serialization=SERIALIZE__PICKLE)
         self.worker.queue_request('complete_task', self._uuid,
                                   callback=self.callback__complete_task)
+        self._thread.join()
 
     def handle_sigterm(self):
         #import pudb; pudb.set_trace()
@@ -289,7 +290,12 @@ class WorkerMonitorMixin(object):
             eventlet.sleep()
 
     def timer__task_monitor(self, io_loop):
-        self._task_monitor.update_state()
+        task_count_limit = getattr(self, 'task_count_limit', 1)
+        completed_task_count = self._task_monitor._task_count 
+        if task_count_limit > 0 and completed_task_count >= task_count_limit:
+            io_loop.stop()
+        else:
+            self._task_monitor.update_state()
 
     def timer__pack(self, io_loop):
         if hasattr(self.deferred_queue, 'pack'):
@@ -330,7 +336,7 @@ class WorkerMonitorMixin(object):
 
         # Periodically pack the queue storage (if applicable).
         callbacks['pack'] = PeriodicCallback(
-            functools.partial(self.timer__pack, io_loop), 15000,
+            functools.partial(self.timer__pack, io_loop), 120000,
             io_loop=io_loop)
         def _on_run():
             logging.getLogger(log_label()).info('')
@@ -360,7 +366,6 @@ class WorkerMonitorMixin(object):
         Wrap the insert/queue methods of the underlying deferred request queue
         to provide callback capabilities (based on request UUID).
         '''
-        logging.getLogger(log_label(self)).info(args[0])
         callback = kwargs.pop('callback', None)
         request_uuid = getattr(self.deferred_queue, add_method_name)(*args,
                                                                      **kwargs)
